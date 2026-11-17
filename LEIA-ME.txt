@@ -1,0 +1,41 @@
+MAPA GPS — como publicar no GitHub Pages
+
+1) COLOCAR O APP NO AR (só na primeira vez)
+   - Entre em https://github.com e crie um repositório (ex.: mapa-gps).
+     Atenção: no plano grátis o GitHub Pages só funciona com repositório
+     PÚBLICO, e aí qualquer pessoa com o link consegue ver os mapas.
+   - No repositório: "Add file" > "Upload files" > arraste TUDO que está
+     dentro desta pasta (index.html, sw.js, manifest.webmanifest, ícones,
+     .nojekyll e a pasta mapas) > "Commit changes".
+     Dica: o arquivo .nojekyll fica oculto em alguns computadores; se ele
+     não for enviado, o site funciona do mesmo jeito.
+   - Vá em "Settings" > "Pages" > em "Branch" escolha "main" e "/ (root)"
+     > "Save". Em 1 a 2 minutos o endereço aparece no topo da página:
+     https://SEU-USUARIO.github.io/mapa-gps/
+
+2) GESTOR: CONFIGURAR OS MAPAS
+   - Abra o endereço > "Modo gestor" (no fim da tela).
+   - "Novo mapa": escolha o PDF e dê um nome.
+   - Calibre: marque 2 ou mais pontos com coordenada conhecida
+     (menu ☰ > Calibrar mapa, ou pelo botão GPS).
+   - Ajustar UPs: toque em todas as áreas que formam a UP (toque de novo
+     para desmarcar) > "Nomear como UP". Se a seleção automática não acertar,
+     use "Desenhar contorno".
+   - Texto: observações com alfinete ou texto escrito no mapa.
+   - "Gerar pacote para o site": baixa mapa-gps-site.zip. Descompacte e
+     envie tudo que está dentro da pasta para o repositório (Upload files),
+     substituindo os arquivos. Faça isso sempre que mudar algum mapa.
+
+3) TRATORISTA
+   - Abra o endereço com internet uma vez e use "Adicionar à tela inicial".
+   - Os mapas ficam salvos no celular e funcionam sem internet.
+   - Medir: desenhando no mapa, pelo trabalho do trator (GPS × largura do
+     implemento) ou contornando a área com o GPS. Resultado em hectares,
+     separado por UP, com histórico e envio do resumo.
+   - Texto: observações no mapa (ficam no celular; dá para enviar pelo
+     WhatsApp com a localização).
+   - GPS: mostra e segue a sua posição.
+   - Para pegar mapas novos, basta abrir o app com internet.
+
+Observação: os mapas em edição ficam guardados no aparelho do gestor.
+Para editar em outro aparelho, use "Trazer os mapas publicados para editar".
