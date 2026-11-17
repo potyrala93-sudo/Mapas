@@ -1,5 +1,5 @@
 // Service worker do Mapa GPS: guarda o app e os mapas para funcionar sem internet.
-const SHELL_CACHE = 'mapa-gps-shell-v2';
+const SHELL_CACHE = 'mapa-gps-shell-v3';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 const CDN = [
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
@@ -51,7 +51,7 @@ self.addEventListener('fetch', e => {
       return;
     }
     e.respondWith((async () => {
-      const hit = await caches.match(req, { ignoreSearch: true });
+      const hit = await caches.match(req, { ignoreSearch: !p.includes('/mapas/') });
       if (hit) return hit;
       const r = await fetch(req);
       if (r.ok && !p.includes('/mapas/')) (await caches.open(SHELL_CACHE)).put(req, r.clone());

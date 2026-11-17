@@ -22,20 +22,21 @@ MAPA GPS — como publicar no GitHub Pages
    - Calibre: com a escala definida, basta 1 ponto com coordenada conhecida
      (latitude/longitude ou UTM). Sem escala, são 2 pontos.
      (menu ☰ > Calibrar mapa, ou pelo botão GPS).
+   - Satélite: botão 🛰️ (precisa de internet). A barra "Mapa" deixa o mapa
+     mais transparente. Para calibrar sem ir a campo: ✋ Alinhar, arraste o
+     mapa até as estradas/rios encaixarem no satélite e toque em Concluir.
    - Ajustar UPs: toque em todas as áreas que formam a UP (toque de novo
      para desmarcar) > "Nomear como UP". Se a seleção automática não acertar,
      use "Desenhar contorno".
    - Texto: observações com alfinete ou texto escrito no mapa.
-   - PUBLICAR (sem entrar no GitHub):
-     Na primeira vez, toque em "Conectar ao GitHub", escreva o repositório
-     (ex.: seu-usuario/mapa-gps) e cole um token de acesso. O app mostra
-     como criar o token (GitHub > Settings > Developer settings >
-     Personal access tokens > Fine-grained tokens, só com este
-     repositório e a permissão "Contents: Read and write").
-     Depois disso, é só tocar em "Publicar agora" sempre que mudar algo.
-     Em 1 a 3 minutos o site atualiza.
-     O token fica guardado só no aparelho do gestor.
-   - Se preferir enviar à mão: "Baixar pacote .zip" e Upload files no GitHub.
+   - ENVIAR PARA OS TRATORISTAS:
+     No Modo gestor, toque em "Gerar arquivos para o GitHub". Descompacte o
+     arquivo baixado: aparece a pasta "mapas". No GitHub, abra o repositório
+     > Add file > Upload files > arraste a pasta "mapas" > Commit changes.
+     Os arquivos com o mesmo nome são substituídos. Em 1 a 3 minutos o site
+     atualiza. Faça isso sempre que mudar algum mapa.
+   - Mapas criados em versões antigas do app ficam "sem escala": abra o mapa,
+     menu ☰ > Escala do mapa > "Ler a escala do PDF" e escolha o mesmo PDF.
 
 3) TRATORISTA
    - Abra o endereço com internet uma vez e use "Adicionar à tela inicial".
