@@ -16,7 +16,11 @@ MAPA GPS — como publicar no GitHub Pages
 2) GESTOR: CONFIGURAR OS MAPAS
    - Abra o endereço > "Modo gestor" (no fim da tela).
    - "Novo mapa": escolha o PDF e dê um nome.
-   - Calibre: marque 2 ou mais pontos com coordenada conhecida
+   - Escala: ao abrir o PDF, o app lê sozinho a barra de escala e o fuso
+     UTM (ex.: 1:17.000, fuso 22 Sul). Se não conseguir, use
+     menu ☰ > Escala do mapa > "Medir na barra de escala".
+   - Calibre: com a escala definida, basta 1 ponto com coordenada conhecida
+     (latitude/longitude ou UTM). Sem escala, são 2 pontos.
      (menu ☰ > Calibrar mapa, ou pelo botão GPS).
    - Ajustar UPs: toque em todas as áreas que formam a UP (toque de novo
      para desmarcar) > "Nomear como UP". Se a seleção automática não acertar,

@@ -209,6 +209,81 @@ if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
 const MAX_SIDE = 4096, MAX_AREA = 15e6;  // limite seguro para celulares (inclusive iPhone)
 const CELL = 1;                           // célula de 1 m para medir área trabalhada
 
+// Projeção UTM (elipsoide GRS80/WGS84 — SIRGAS 2000), séries de Krüger (precisão sub-milimétrica)
+const UTM = (() => {
+  const a = 6378137, f = 1 / 298.257222101, k0 = 0.9996, D = Math.PI / 180;
+  const n = f / (2 - f), n2 = n * n, n3 = n2 * n, n4 = n3 * n;
+  const A = a / (1 + n) * (1 + n2 / 4 + n4 / 64);
+  const al = [n / 2 - 2 * n2 / 3 + 5 * n3 / 16 + 41 * n4 / 180, 13 * n2 / 48 - 3 * n3 / 5 + 557 * n4 / 1440, 61 * n3 / 240 - 103 * n4 / 140, 49561 * n4 / 161280];
+  const be = [n / 2 - 2 * n2 / 3 + 37 * n3 / 96 - n4 / 360, n2 / 48 + n3 / 15 - 437 * n4 / 1440, 17 * n3 / 480 - 37 * n4 / 840, 4397 * n4 / 161280];
+  const de = [2 * n - 2 * n2 / 3 - 2 * n3 + 116 * n4 / 45, 7 * n2 / 3 - 8 * n3 / 5 - 227 * n4 / 45, 56 * n3 / 15 - 136 * n4 / 35, 4279 * n4 / 630];
+  const c2 = 2 * Math.sqrt(n) / (1 + n);
+  const lon0 = zone => ((zone - 1) * 6 - 180 + 3) * D;
+  function fwd(lat, lon, zone, south) {
+    const phi = lat * D, lam = lon * D - lon0(zone);
+    const t = Math.sinh(Math.atanh(Math.sin(phi)) - c2 * Math.atanh(c2 * Math.sin(phi)));
+    const xi = Math.atan2(t, Math.cos(lam)), eta = Math.atanh(Math.sin(lam) / Math.sqrt(1 + t * t));
+    let E = eta, N = xi;
+    for (let j = 1; j <= 4; j++) { E += al[j - 1] * Math.cos(2 * j * xi) * Math.sinh(2 * j * eta); N += al[j - 1] * Math.sin(2 * j * xi) * Math.cosh(2 * j * eta); }
+    return { E: 500000 + k0 * A * E, N: (south ? 10000000 : 0) + k0 * A * N };
+  }
+  function inv(E, N, zone, south) {
+    const xi = (N - (south ? 10000000 : 0)) / (k0 * A), eta = (E - 500000) / (k0 * A);
+    let xp = xi, ep = eta;
+    for (let j = 1; j <= 4; j++) { xp -= be[j - 1] * Math.sin(2 * j * xi) * Math.cosh(2 * j * eta); ep -= be[j - 1] * Math.cos(2 * j * xi) * Math.sinh(2 * j * eta); }
+    const chi = Math.asin(Math.sin(xp) / Math.cosh(ep));
+    let phi = chi;
+    for (let j = 1; j <= 4; j++) phi += de[j - 1] * Math.sin(2 * j * chi);
+    return { lat: phi / D, lon: (lon0(zone) + Math.atan2(Math.sinh(ep), Math.cos(xp))) / D };
+  }
+  const zoneOf = lon => Math.min(60, Math.max(1, Math.floor((lon + 180) / 6) + 1));
+  return { fwd, inv, zoneOf };
+})();
+
+// Lê a barra de escala e o fuso UTM a partir do texto do PDF (itens do pdf.js: str, transform, width)
+function detectPdfGeo(items) {
+  const out = { mPerPt: null, ratio: null, zone: null, south: null, how: null };
+  const nums = [];
+  for (const it of items) {
+    const s = String(it.str || '').trim();
+    if (!/^(\d{1,3}(\.\d{3})+|\d+)(,\d+)?$/.test(s)) continue;
+    nums.push({ v: parseFloat(s.replace(/\./g, '').replace(',', '.')), x: it.transform[4] + (it.width || 0) / 2, y: it.transform[5] });
+  }
+  let best = null;
+  for (const z of nums) {
+    if (z.v !== 0) continue;
+    const row = nums.filter(n => Math.abs(n.y - z.y) < 2.5 && n.x > z.x + 1 && n.v > 0).sort((a, b) => a.x - b.x);
+    if (row.length < 2) continue;
+    const last = row[row.length - 1], k = (last.x - z.x) / last.v;
+    let ok = k > 0;
+    for (let i = 0; ok && i < row.length; i++) {
+      if (i && row[i].v <= row[i - 1].v) ok = false;
+      else if (Math.abs(z.x + row[i].v * k - row[i].x) > Math.max(1.5, 0.03 * (row[i].x - z.x))) ok = false;
+    }
+    if (!ok) continue;
+    const km = items.some(it => /^km$/i.test(String(it.str).trim()) && Math.abs(it.transform[5] - z.y) < 25 && it.transform[4] > last.x - 60);
+    const cand = { ptPerM: k / (km ? 1000 : 1), span: last.x - z.x };
+    if (!best || cand.span > best.span) best = cand;
+  }
+  const PT = 0.0254 / 72;   // metros de papel por ponto PDF
+  if (best) {
+    let ratio = (1 / best.ptPerM) / PT;
+    const snap = Math.round(ratio / 100) * 100;
+    if (snap > 0 && Math.abs(snap - ratio) / ratio < 0.005) ratio = snap;
+    if (ratio >= 200 && ratio <= 2e6) { out.ratio = ratio; out.mPerPt = ratio * PT; out.how = 'barra de escala do PDF'; }
+  }
+  const full = items.map(it => it.str).join(' ').replace(/\s+/g, ' ');
+  if (!out.mPerPt) {
+    const m = full.match(/\b1\s*[:/]\s*(\d{1,3}(?:\.\d{3})+|\d{3,7})\b/);
+    if (m) { const r = +m[1].replace(/\./g, ''); if (r >= 200 && r <= 2e6) { out.ratio = r; out.mPerPt = r * PT; out.how = 'escala escrita no PDF'; } }
+  }
+  let m = full.match(/Fuso\s*:?\s*(\d{1,2})\s*(Sul|Norte|S\b|N\b)?/i);
+  if (m) { out.zone = +m[1]; if (m[2]) out.south = /^s/i.test(m[2]); }
+  else if ((m = full.match(/Merid\w*\s*(?:Central)?\s*:?\s*(\d{1,3})\s*[º°]?\s*([WO])/i))) out.zone = Math.floor((180 - +m[1]) / 6) + 1;
+  if (out.zone && (out.zone < 1 || out.zone > 60)) out.zone = null;
+  return out;
+}
+
 /* ---- GPS simulado (modo teste): dentro do visualizador do Claude ou com #simular no endereço ---- */
 const SIM = location.hash === '#simular' || (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
 let simPos = null, simT = Date.now(), simId = 0;
@@ -256,6 +331,7 @@ const fmtM = m => m < 10 ? m.toFixed(1).replace('.', ',') + ' m' : m < 1000 ? Ma
 const fmtHa = m2 => (m2 / 10000).toFixed(2).replace('.', ',') + ' ha';
 const hasCoord = p => Number.isFinite(p.lat) && Number.isFinite(p.lon);
 const hm = d => d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+const fmtInt = n => Math.round(n || 0).toLocaleString('pt-BR');
 const fmtDate = t => { const d = new Date(t); return d.toLocaleDateString('pt-BR') + ' ' + hm(d); };
 
 /* ================= utilidades de interface ================= */
@@ -343,16 +419,57 @@ function lsq3(P, key) {
   if (!Number.isFinite(d) || Math.abs(d) < 1e-6 * Math.abs(sxx * syy * n)) return null;
   return [0, 1, 2].map(i => det3(M.map((row, k) => row.map((v, j) => j === i ? r[k] : v))) / d);
 }
+// pontos necessários para calibrar: com a escala do mapa definida, 1 ponto basta
+const hasScale = map => !!(map && map.geo && map.geo.mPerPx > 0);
+const needPts = map => hasScale(map) ? 1 : 2;
 function computeTransform(map) {
   const calib = map.calib || [];
   calib.forEach(p => { p.err = null; });
   const pts = calib.filter(hasCoord);
-  if (pts.length < 2) return null;
+  if (pts.length < needPts(map)) return null;
+  const T = hasScale(map) ? utmTransform(map, pts) : fitTransform(pts, !!map.affine);
+  if (!T) return null;
+  let sum = 0;
+  pts.forEach(p => { const m = geoToMap(p.lat, p.lon, T); p.err = Math.hypot(m.x - p.x, m.y - p.y) / T.mpu; sum += p.err; });
+  T.n = pts.length;
+  T.meanErr = pts.length > (T.utm ? (T.utm.rotFit ? 2 : 1) : (T.affine ? 3 : 2)) ? sum / pts.length : null;
+  return T;
+}
+// mapa em UTM com escala conhecida: posiciona com 1 ponto (ou mais, para conferir/girar)
+function utmTransform(map, pts) {
+  const g = map.geo, m = g.mPerPx;
+  const zone = g.zone || UTM.zoneOf(pts[0].lon), south = g.south != null ? g.south : pts[0].lat < 0;
+  const Q = pts.map(p => { const e = UTM.fwd(p.lat, p.lon, zone, south); return { E: e.E, N: e.N, gx: p.x * m, gy: -p.y * m }; });
+  let rot = 0; const rotFit = !!g.rotated && Q.length >= 2;
+  if (rotFit) {
+    let mE = 0, mN = 0, mx = 0, my = 0; Q.forEach(q => { mE += q.E; mN += q.N; mx += q.gx; my += q.gy; });
+    mE /= Q.length; mN /= Q.length; mx /= Q.length; my /= Q.length;
+    let re = 0, im = 0;
+    Q.forEach(q => { const a = q.E - mE, b = q.N - mN, c = q.gx - mx, d = q.gy - my; re += a * c + b * d; im += b * c - a * d; });
+    rot = Math.atan2(im, re);
+  }
+  const c = Math.cos(rot), s = Math.sin(rot);
+  let E0 = 0, N0 = 0;
+  Q.forEach(q => { E0 += q.E - (c * q.gx - s * q.gy); N0 += q.N - (s * q.gx + c * q.gy); });
+  E0 /= Q.length; N0 /= Q.length;
+  const syn = [];
+  for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++) {
+    const u = map.w * i / 4, v = map.h * j / 4, gx = u * m, gy = -v * m;
+    const ll = UTM.inv(E0 + c * gx - s * gy, N0 + s * gx + c * gy, zone, south);
+    syn.push({ lat: ll.lat, lon: ll.lon, x: u, y: v });
+  }
+  const T = fitTransform(syn, true); if (!T) return null;
+  T.utm = { zone, south, E0, N0, rot, m, rotFit };
+  return T;
+}
+function mapToUtm(u, v, T) { const t = T.utm, gx = u * t.m, gy = -v * t.m, c = Math.cos(t.rot), s = Math.sin(t.rot); return { E: t.E0 + c * gx - s * gy, N: t.N0 + s * gx + c * gy }; }
+// ajuste entre lat/lon e posição no mapa (semelhança; afim com 3+ pontos se pedido)
+function fitTransform(pts, wantAffine) {
   const lat0 = pts.reduce((a, p) => a + p.lat, 0) / pts.length, lon0 = pts.reduce((a, p) => a + p.lon, 0) / pts.length;
   const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110540;
   const P = pts.map(p => ({ x: (p.lon - lon0) * kx, y: (p.lat - lat0) * ky, u: p.x, v: p.y, p }));
   let A, B, C, D, E, F, affine = false, affineFailed = false;
-  if (map.affine && P.length >= 3) {
+  if (wantAffine && P.length >= 3) {
     const su = lsq3(P, 'u'), sv = lsq3(P, 'v');
     if (su && sv) { [A, B, C] = su; [D, E, F] = sv; affine = true; } else affineFailed = true;
   }
@@ -368,18 +485,26 @@ function computeTransform(map) {
   }
   const det = A * E - B * D;
   if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
-  const T = { lat0, lon0, kx, ky, A, B, C, D, E, F, det, mpu: Math.sqrt(Math.abs(det)), n: P.length, affine, affineFailed };
-  let sum = 0;
-  P.forEach(q => { const m = geoToMap(q.p.lat, q.p.lon, T); q.p.err = Math.hypot(m.x - q.u, m.y - q.v) / T.mpu; sum += q.p.err; });
-  T.meanErr = P.length > (affine ? 3 : 2) ? sum / P.length : null;
-  return T;
+  return { lat0, lon0, kx, ky, A, B, C, D, E, F, det, mpu: Math.sqrt(Math.abs(det)), n: P.length, affine, affineFailed };
 }
 function geoToMap(lat, lon, T) { const x = (lon - T.lon0) * T.kx, y = (lat - T.lat0) * T.ky; return { x: T.A * x + T.B * y + T.C, y: T.D * x + T.E * y + T.F }; }
 function mapToGeo(u, v, T) { const a = u - T.C, b = v - T.F, x = (T.E * a - T.B * b) / T.det, y = (-T.D * a + T.A * b) / T.det; return { lat: T.lat0 + y / T.ky, lon: T.lon0 + x / T.kx }; }
 const toLocal = (lat, lon) => ({ x: (lon - S.T.lon0) * S.T.kx, y: (lat - S.T.lat0) * S.T.ky });
+// metros por pixel do mapa: pela escala (exata) ou pela calibração do GPS
+const hasMetric = () => !!(S.map && (hasScale(S.map) || S.T));
+const mPerPx = () => hasScale(S.map) ? S.map.geo.mPerPx : (S.T ? 1 / S.T.mpu : null);
 // área (m²) e perímetro (m) de um polígono em coordenadas do mapa
 function polyMetrics(mapPts) {
-  if (!S.T || mapPts.length < 2) return { area: 0, perim: 0 };
+  if (!hasMetric() || mapPts.length < 2) return { area: 0, perim: 0 };
+  if (hasScale(S.map)) {
+    const m = S.map.geo.mPerPx; let a = 0, per = 0;
+    for (let i = 0; i < mapPts.length; i++) {
+      const p = mapPts[i], q = mapPts[(i + 1) % mapPts.length];
+      a += p[0] * q[1] - q[0] * p[1];
+      if (i < mapPts.length - 1 || mapPts.length >= 3) per += Math.hypot(q[0] - p[0], q[1] - p[1]);
+    }
+    return { area: mapPts.length >= 3 ? Math.abs(a) / 2 * m * m : 0, perim: per * m };
+  }
   const L = mapPts.map(p => { const g = mapToGeo(p[0], p[1], S.T); return toLocal(g.lat, g.lon); });
   let a = 0, per = 0;
   for (let i = 0; i < L.length; i++) {
@@ -591,10 +716,10 @@ function drawUpNames() {
 function niceNum(x) { const e = Math.pow(10, Math.floor(Math.log10(x))), f = x / e; return +((f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * e).toPrecision(3); }
 function updateScale() {
   const el = $('#scale');
-  if (!S.T || !S.map) { el.classList.add('hidden'); return; }
-  const mPerPx = 1 / (S.T.mpu * S.view.s), nice = niceNum(90 * mPerPx);
+  if (!S.map || !hasMetric()) { el.classList.add('hidden'); return; }
+  const mpp = mPerPx() / S.view.s, nice = niceNum(90 * mpp);
   el.classList.remove('hidden');
-  $('#scaleBar').style.width = (nice / mPerPx) + 'px';
+  $('#scaleBar').style.width = (nice / mpp) + 'px';
   $('#scaleTxt').textContent = nice >= 1000 ? String(nice / 1000).replace('.', ',') + ' km' : String(nice).replace('.', ',') + ' m';
 }
 function drawPart(p) {
@@ -620,6 +745,7 @@ function draw() {
   for (const o of S.map.labels) drawObs(o);
   for (const o of S.obsLocal) drawObs(o);
   if (S.mode === 'calib') drawCalib();
+  if (S.mode === 'scalebar' && S.sbar && S.sbar.length) { drawPolyline(S.sbar, '#dc2626', null, false); drawVertices(S.sbar, '#dc2626'); }
   if (S.poly && S.poly.length) { drawPolyline(S.poly, '#0284c7', 'rgba(14,165,233,.22)', false); drawVertices(S.poly, '#0284c7'); }
   if (S.mdraw && S.mdraw.length) { drawPolyline(S.mdraw, '#ea580c', 'rgba(234,88,12,.2)', false); drawVertices(S.mdraw, '#ea580c'); }
   drawGps();
@@ -698,6 +824,10 @@ function onTap(hit, x, y) {
     const g = mapToGeo(mx, my, S.T); simMoveTo(g.lat, g.lon); return;
   }
   switch (S.mode) {
+    case 'scalebar':
+      S.sbar.push([mx, my]); renderModeBar(); requestDraw();
+      if (S.sbar.length === 2) finishScaleBar();
+      return;
     case 'calib':
       if (hit && hit.type === 'calib') return openCalibSheet(hit.ref, false);
       return openCalibSheet({ id: uid(), x: mx, y: my, lat: null, lon: null }, true);
@@ -805,8 +935,8 @@ function upAtMap(mx, my, skipId) {
   return null;
 }
 function gpsUp() { if (!S.gps || !S.T) return null; const m = geoToMap(S.gps.lat, S.gps.lon, S.T); return upAtMap(m.x, m.y); }
-const areaM2 = px => S.T ? px / Math.abs(S.T.det) : null;
-const fmtAreaPx = px => S.T ? fmtHa(areaM2(px)) : null;
+const areaM2 = px => { const m = mPerPx(); return m ? px * m * m : null; };
+const fmtAreaPx = px => hasMetric() ? fmtHa(areaM2(px)) : null;
 function mergeParts(parts) {
   if (!parts.length) return null;
   let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
@@ -819,7 +949,7 @@ function mergeParts(parts) {
 }
 // quanto de um polígono (coordenadas do mapa) cai em cada UP
 function polyPerUp(mapPts) {
-  if (!S.T || mapPts.length < 3) return { perUp: [], outM2: 0 };
+  if (!hasMetric() || mapPts.length < 3) return { perUp: [], outM2: 0 };
   const pm = maskFromPoly(mapPts); if (pm.error) return { perUp: [], outM2: 0 };
   const perUp = []; let inside = 0;
   for (const up of S.map.ups) {
@@ -1028,7 +1158,7 @@ function onPickAdjust() {
 }
 function pickSubText() {
   const P = S.pick, n = P.parts.length, mg = pickMerged();
-  let t = n ? `${n} área${n > 1 ? 's' : ''} marcada${n > 1 ? 's' : ''}` + (mg && S.T ? ' · ' + fmtAreaPx(mg.area) : '') : (S.upMode === 'draw' ? 'Toque nos cantos para desenhar uma área' : 'Toque nas áreas que formam a UP');
+  let t = n ? `${n} área${n > 1 ? 's' : ''} marcada${n > 1 ? 's' : ''}` + (mg && hasMetric() ? ' · ' + fmtAreaPx(mg.area) : '') : (S.upMode === 'draw' ? 'Toque nos cantos para desenhar uma área' : 'Toque nas áreas que formam a UP');
   if (P.err) t += '<br><span style="color:#b45309">⚠️ ' + esc(P.err) + '</span>';
   return t;
 }
@@ -1079,10 +1209,10 @@ function renderCtx() {
   } else if (S.mode === 'measure' && S.mKind === 'desenho') {
     const n = S.mdraw.length, mt = polyMetrics(S.mdraw);
     html = `<div class="mhead"><b>✏️ Medir desenhando</b><span class="sp" style="flex:1"></span><span class="muted small">${n} ponto(s)</span></div>`;
-    if (!S.T) html += `<div class="warnline">Este mapa não está calibrado, por isso não dá para medir.</div>`;
+    if (!hasMetric()) html += `<div class="warnline">Defina a escala do mapa (menu ☰ → Escala) ou calibre para poder medir.</div>`;
     else if (n < 3) html += `<div class="muted small" style="margin-top:4px">Toque nos cantos da área no mapa, em ordem.${n === 2 ? ' Distância: ' + fmtM(mt.perim) : ''}</div>`;
     else html += `<div class="cbig">${fmtHa(mt.area)}</div><div class="muted small">Perímetro ${fmtM(mt.perim)}</div>`;
-    html += `<div class="upact"><button class="btn" id="mdUndo" ${n ? '' : 'disabled'}>↶ Desfazer</button><button class="btn" id="mdClear" ${n ? '' : 'disabled'}>Limpar</button><button class="btn primary" id="mdSave" ${n >= 3 && S.T ? '' : 'disabled'}>💾 Salvar</button></div>`;
+    html += `<div class="upact"><button class="btn" id="mdUndo" ${n ? '' : 'disabled'}>↶ Desfazer</button><button class="btn" id="mdClear" ${n ? '' : 'disabled'}>Limpar</button><button class="btn primary" id="mdSave" ${n >= 3 && hasMetric() ? '' : 'disabled'}>💾 Salvar</button></div>`;
   } else if (S.mode === 'measure' && !S.meas) {
     if (S.mKind === 'trabalho') {
       let w = 6; try { w = +localStorage.getItem('implW') || 6; } catch (e) { }
@@ -1221,6 +1351,23 @@ function parseCoords(s) {
   if (!Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a) > 90 || Math.abs(b) > 180) return null;
   return [a, b];
 }
+// aceita lat/lon ou UTM (E N) no fuso do mapa
+function parseCoordsAny(str) {
+  const ll = parseCoords(str); if (ll) return ll;   // primeiro tenta latitude/longitude
+  const nums = String(str || '').replace(/[−–]/g, '-').match(/-?\d+(?:[.,]\d+)*/g);
+  if (nums && nums.length >= 2) {
+    const v = nums.slice(0, 2).map(t => { const c = t.replace(/\.(?=\d{3}(\D|$))/g, ''); return parseFloat(c.replace(',', '.')); });
+    if (Math.abs(v[0]) > 1000 && Math.abs(v[1]) > 1000) {
+      const g = S.map && S.map.geo;
+      if (!g || !g.zone) return { error: 'Para usar UTM, defina o fuso do mapa em ☰ → Escala do mapa.' };
+      const E = Math.min(v[0], v[1]), N = Math.max(v[0], v[1]);
+      if (E < 100000 || E > 900000 || N < 0 || N > 10000000) return { error: 'Coordenada UTM fora do intervalo esperado.' };
+      const ll = UTM.inv(E, N, g.zone, g.south !== false);
+      return [ll.lat, ll.lon];
+    }
+  }
+  return null;
+}
 function captureGps(secs, onProg) {
   let id = null, timer = null, done = false, abort;
   const samples = [], t0 = Date.now();
@@ -1249,10 +1396,10 @@ function captureGps(secs, onProg) {
   return { promise, abort: () => abort && abort() };
 }
 function calibToast() {
-  const n = S.map.calib.filter(hasCoord).length;
-  if (n < 2) toast(`Ponto salvo. ${2 - n === 1 ? 'Falta 1 ponto' : 'Faltam 2 pontos'} para calibrar.`);
+  const n = S.map.calib.filter(hasCoord).length, k = needPts(S.map);
+  if (n < k) toast(`Ponto salvo. ${k - n === 1 ? 'Falta 1 ponto' : 'Faltam 2 pontos'} para calibrar.`);
   else if (!S.T) toast('Não deu para calibrar: os pontos estão muito próximos ou iguais.', 4500);
-  else { toast(S.T.meanErr != null ? `Mapa calibrado ✓ Erro médio ~${fmtM(S.T.meanErr)}` : 'Mapa calibrado ✓ Um 3º ponto ajuda a conferir a precisão.', 4000); simPlaceAtCenter(); startGps(); }
+  else { toast(S.T.meanErr != null ? `Mapa calibrado ✓ Diferença média entre os pontos: ~${fmtM(S.T.meanErr)}` : (S.T.utm ? 'Mapa calibrado ✓ (escala + 1 ponto). Outro ponto, longe deste, serve para conferir.' : 'Mapa calibrado ✓ Um 3º ponto ajuda a conferir a precisão.'), 4500); simPlaceAtCenter(); startGps(); }
 }
 function openCalibSheet(P, isNew) {
   const calib = S.map.calib, orig = { ...P };
@@ -1265,8 +1412,9 @@ function openCalibSheet(P, isNew) {
     <button class="btn primary wide" id="cg">📍 Estou neste ponto: usar meu GPS</button>
     <div id="cgs" class="muted small" style="margin-top:6px"></div>
     <div class="or">ou digite a coordenada</div>
-    <input type="text" id="cc" placeholder="Ex.: -23.550520, -46.633308" value="${val}" autocomplete="off" autocapitalize="off" spellcheck="false">
-    <p class="muted small">No Google Maps, toque e segure num ponto para ver e copiar a latitude e a longitude.</p>
+    <input type="text" id="cc" placeholder="Ex.: -23.550520, -46.633308${S.map.geo && S.map.geo.zone ? '  ou  UTM 745320 7456780' : ''}" value="${val}" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <p class="muted small">No Google Maps, toque e segure num ponto para ver e copiar a latitude e a longitude.${S.map.geo && S.map.geo.zone ? ` Também aceita coordenada <b>UTM</b> (E e N, fuso ${S.map.geo.zone}).` : ''}</p>
+    ${hasScale(S.map) ? '<p class="muted small">Com a escala do mapa definida, <b>1 ponto</b> já calibra. Pontos extras servem para conferir.</p>' : ''}
     <p class="muted small">Para mais precisão, use pontos <b>bem afastados</b> (ex.: cantos opostos do mapa). Arraste a mira para ajustar a posição.</p>
     <div class="row">${isNew ? '' : '<button class="btn danger" id="cdel">Excluir</button>'}<span class="sp"></span><button class="btn" id="ccancel">Cancelar</button><button class="btn primary" id="csave">Salvar</button></div>`, cancel);
   let capturing = null;
@@ -1288,7 +1436,8 @@ function openCalibSheet(P, isNew) {
   };
   $('#ccancel').onclick = () => { closeSheet(); cancel(); };
   $('#csave').onclick = () => {
-    const v = parseCoords($('#cc').value);
+    const v = parseCoordsAny($('#cc').value);
+    if (v && v.error) { $('#cgs').innerHTML = '⚠️ ' + esc(v.error); return; }
     if (!v) { $('#cgs').innerHTML = '⚠️ Coordenada inválida. Use o formato: -23.550520, -46.633308'; return; }
     if (capturing) capturing.abort();
     P.lat = v[0]; P.lon = v[1];
@@ -1296,6 +1445,66 @@ function openCalibSheet(P, isNew) {
   };
   if (!isNew) $('#cdel').onclick = () => { remove(); closeSheet(); S.T = computeTransform(S.map); markDirty(); updateUI(); toast('Ponto excluído'); };
   ensureVisible(P.x, P.y);
+}
+
+/* ================= escala do mapa ================= */
+function parseDistance(t) {
+  let s = String(t || '').toLowerCase().replace(/\s/g, '');
+  const km = /km$/.test(s); s = s.replace(/[a-z]/g, '');
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? v * (km ? 1000 : 1) : NaN;
+}
+function afterScaleChange() { S.T = computeTransform(S.map); if (S.sel) S.sel.res = S.upCache.get(S.sel.up.id) || S.sel.res; markDirty(); renderCtx(); updateUI(); }
+async function finishScaleBar() {
+  const [a, b] = S.sbar, dpx = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (dpx * S.view.s < 15) { toast('Os dois toques ficaram muito perto. Dê mais zoom na barra e tente de novo.'); S.sbar = []; renderModeBar(); requestDraw(); return; }
+  const t = await askText('Quantos metros tem esse trecho da barra?', 'Ex.: 1160  (ou 1,16 km)', '', 'Definir escala');
+  if (t == null) { S.sbar = []; renderModeBar(); requestDraw(); return; }
+  const meters = parseDistance(t);
+  if (!(meters > 0)) { toast('Valor inválido. Digite os metros do trecho, ex.: 1160'); S.sbar = []; renderModeBar(); requestDraw(); return; }
+  const m = meters / dpx, map = S.map, g = map.geo || { zone: null, south: null, rotated: false };
+  const ratio = map.paperMmPerPx ? m / (map.paperMmPerPx / 1000) : null;
+  map.geo = { ...g, mPerPx: m, ratio, src: 'medida na barra do mapa' };
+  setMode('pan', true); afterScaleChange();
+  toast(`Escala definida ✓ ${ratio ? '≈ 1:' + fmtInt(Math.round(ratio / 100) * 100) + ' · ' : ''}1 pixel = ${m.toFixed(3).replace('.', ',')} m`, 5000);
+}
+function scaleSummary(map) {
+  const g = map.geo || {};
+  const parts = [];
+  if (hasScale(map)) parts.push(`<b>1:${g.ratio ? fmtInt(g.ratio) : '?'}</b> · 1 pixel = ${g.mPerPx.toFixed(3).replace('.', ',')} m${g.src ? ' · ' + esc(g.src) : ''}`);
+  else parts.push('Escala ainda não definida.');
+  if (g.zone) parts.push(`UTM fuso ${g.zone} ${g.south === false ? 'Norte' : 'Sul'}`);
+  return parts.join('<br>');
+}
+function openScaleSheet() {
+  const map = S.map, g = map.geo || {};
+  openSheet(`<h3>📏 Escala do mapa</h3>
+    <p class="muted small" style="margin-top:-4px">Com a escala, as áreas (UPs e medidas desenhadas) saem exatas e o GPS precisa de <b>1 ponto</b> só para calibrar.</p>
+    <div class="panel" style="box-shadow:none;border:1px solid var(--line)">${scaleSummary(map)}</div>
+    <button class="btn wide" id="scBar" style="margin-top:10px">📏 Medir na barra de escala do mapa</button>
+    ${map.paperMmPerPx ? `<div class="field"><label>Ou digite a escala (vale para o PDF em tamanho original)</label><div class="inl" style="margin:0"><span>1 :</span><input type="text" id="scRatio" inputmode="numeric" style="width:150px" value="${g.ratio ? fmtInt(g.ratio) : ''}" placeholder="17.000"></div></div>` : ''}
+    <div class="field"><label>Fuso UTM do mapa (veja em “Informações técnicas”)</label><div class="inl" style="margin:0"><input type="number" id="scZone" min="1" max="60" style="width:90px" value="${g.zone || ''}" placeholder="22"><select id="scHem" style="width:auto"><option value="S" ${g.south !== false ? 'selected' : ''}>Sul</option><option value="N" ${g.south === false ? 'selected' : ''}>Norte</option></select></div></div>
+    <label class="chk"><input type="checkbox" id="scRot" ${g.rotated ? 'checked' : ''}><span>O mapa está girado (o norte não aponta para cima). Nesse caso são necessários 2 pontos.</span></label>
+    <div class="row">${hasScale(map) ? '<button class="btn danger" id="scDel">Remover escala</button>' : ''}<span class="sp"></span><button class="btn" id="scNo">Cancelar</button><button class="btn primary" id="scOk">Salvar</button></div>`);
+  $('#scNo').onclick = closeSheet;
+  $('#scBar').onclick = () => { closeSheet(); setMode('scalebar'); };
+  $('#scOk').onclick = () => {
+    const ng = { mPerPx: 0, ratio: null, src: null, ...g, rotated: $('#scRot').checked };
+    const z = parseInt($('#scZone').value, 10); ng.zone = z >= 1 && z <= 60 ? z : null; ng.south = $('#scHem').value === 'S';
+    if ($('#scRatio')) {
+      const r = parseInt(String($('#scRatio').value).replace(/\D/g, ''), 10);
+      if (r >= 200 && r <= 2e6 && r !== Math.round(g.ratio || 0)) { ng.ratio = r; ng.mPerPx = r * map.paperMmPerPx / 1000; ng.src = 'escala digitada'; }
+    }
+    map.geo = ng; closeSheet(); afterScaleChange();
+    toast(hasScale(map) ? `Escala salva: 1:${ng.ratio ? fmtInt(ng.ratio) : '?'}${ng.zone ? ' · fuso ' + ng.zone : ''}` : 'Fuso salvo. Falta definir a escala.');
+  };
+  if ($('#scDel')) $('#scDel').onclick = async () => {
+    closeSheet();
+    if (!(await confirmSheet('Remover a escala? As áreas passam a depender da calibração por GPS (2 pontos).', 'Remover'))) return;
+    map.geo = { ...g, mPerPx: 0, ratio: null, src: null }; afterScaleChange();
+  };
 }
 
 /* ================= GPS ================= */
@@ -1335,7 +1544,7 @@ function gpsAction() {
   if (!S.map) return;
   if (!S.T) {
     if (S.role === 'edit') {
-      openSheet(`<h3>Calibrar o mapa</h3><p>Para mostrar a sua localização, o app precisa saber onde o mapa fica no mundo. Marque <b>2 ou mais pontos</b> do mapa com coordenada conhecida (pode ser onde você está agora).</p>
+      openSheet(`<h3>Calibrar o mapa</h3><p>Para mostrar a sua localização, o app precisa saber onde o mapa fica no mundo. Marque <b>${hasScale(S.map) ? '1 ponto' : '2 ou mais pontos'}</b> do mapa com coordenada conhecida (pode ser onde você está agora).</p>
         <div class="row"><span class="sp"></span><button class="btn" id="gcn">Agora não</button><button class="btn primary" id="gcy">📐 Calibrar agora</button></div>`);
       $('#gcn').onclick = closeSheet; $('#gcy').onclick = () => { closeSheet(); setMode('calib'); };
     } else toast('Este mapa não está calibrado. Avise o gestor.', 4500);
@@ -1600,7 +1809,8 @@ function renderModeBar() {
   const seg = (attr, key, opts) => opts.map(([v, l]) => `<button data-${attr}="${v}" class="${S[key] === v ? 'on' : ''}">${l}</button>`).join('');
   if (S.mode === 'up') html = seg('up-mode', 'upMode', [['auto', 'Tocar nas áreas'], ['draw', 'Desenhar contorno']]);
   else if (S.mode === 'measure') html = seg('m-kind', 'mKind', [['desenho', '✏️ Desenhar'], ['trabalho', '🚜 Trabalho'], ['contorno', '🚶 Contorno']]);
-  else if (S.mode === 'calib') { const n = S.map.calib.filter(hasCoord).length; html = `<span class="mb-t">📐 Calibrando · ${n} ponto(s)</span><button class="on" id="mbDone">✓ Concluir</button>`; }
+  else if (S.mode === 'calib') { const n = S.map.calib.filter(hasCoord).length; html = `<span class="mb-t">📐 Calibrando · ${n} de ${needPts(S.map)} ponto(s)</span><button class="on" id="mbDone">✓ Concluir</button>`; }
+  else if (S.mode === 'scalebar') html = `<span class="mb-t">📏 Toque nas 2 pontas da barra · ${(S.sbar || []).length}/2</span><button id="mbDone">Cancelar</button>`;
   el.innerHTML = html; el.classList.toggle('hidden', !html); document.body.classList.toggle('hasbar', !!html);
   $$('#modeBar [data-up-mode]').forEach(b => b.onclick = () => { S.upMode = b.dataset.upMode; S.poly = S.upMode === 'draw' ? [] : null; renderModeBar(); renderCtx(); requestDraw(); showHint(S.upMode === 'draw' ? 'updraw' : 'up'); });
   $$('#modeBar [data-m-kind]').forEach(b => b.onclick = () => { S.mKind = b.dataset.mKind; S.mdraw = S.mKind === 'desenho' ? (S.mdraw || []) : S.mdraw; renderModeBar(); renderCtx(); requestDraw(); showHint('m_' + S.mKind); });
@@ -1614,7 +1824,8 @@ const HINTS = {
   m_trabalho: 'Informe a largura do implemento e toque em Iniciar. A área soma enquanto o trator anda.',
   m_contorno: 'Toque em Iniciar e dê a volta na área com o celular.',
   text: 'Toque no mapa para escrever uma observação.',
-  calib: 'Toque no mapa num ponto de coordenada conhecida (ou onde você está agora).'
+  calib: 'Toque no mapa num ponto de coordenada conhecida (ou onde você está agora).',
+  scalebar: 'Dê zoom na barra de escala e toque bem no início (0) e no fim (ex.: 1.160) do trecho.'
 };
 let hintT;
 function showHint(key) {
@@ -1629,6 +1840,7 @@ function setMode(m, silent) {
   S.pick = null; S.poly = null;
   if (m === 'up') pickStart(null);
   if (m === 'measure' && !S.mdraw) S.mdraw = [];
+  S.sbar = m === 'scalebar' ? [] : null;
   if (m !== 'measure') S.mdraw = null;
   renderCtx(); updateUI();
   if (!silent) showHint(m === 'up' ? (S.upMode === 'draw' ? 'updraw' : 'up') : m === 'measure' ? 'm_' + S.mKind : m);
@@ -1640,7 +1852,7 @@ function updateStatus() {
   if (!S.map) return;
   const n = S.map.calib.filter(hasCoord).length;
   let cls = '', msg = '';
-  if (!S.T) { cls = 'warn'; msg = S.role === 'edit' ? `Sem calibração (${n}/2 pontos)` : 'Mapa sem calibração (avise o gestor)'; }
+  if (!S.T) { cls = 'warn'; const k = needPts(S.map); msg = S.role === 'edit' ? `Sem calibração (${n}/${k} ponto${k > 1 ? 's' : ''})` : 'Mapa sem calibração (avise o gestor)'; }
   else if (S.gpsState === 'off') msg = 'GPS desligado';
   else if (S.gpsState === 'waiting') { cls = 'warn'; msg = 'Procurando GPS…'; }
   else if (S.gpsState === 'error') { cls = 'err'; msg = S.gpsErr; }
@@ -1699,7 +1911,7 @@ function openDriveMenu() {
     ${S.obsLocal.length ? '<button class="btn wide" id="dmObsShare" style="margin-top:8px">📤 Enviar minhas observações</button>' : ''}
     <h4>Localização</h4>
     <div class="grid2"><button class="btn" id="dmGps">${S.watchId != null ? '⏹ Desligar GPS' : '▶️ Ligar GPS'}</button><button class="btn" id="dmComp">🧭 Bússola: ${S.compassOn ? 'ligada' : 'desligada'}</button></div>
-    ${S.gps ? `<p class="muted small">Sua posição: ${S.gps.lat.toFixed(6)}, ${S.gps.lon.toFixed(6)} (±${Math.round(S.gps.acc)} m)</p>` : ''}
+    ${S.gps ? `<p class="muted small">Sua posição: ${S.gps.lat.toFixed(6)}, ${S.gps.lon.toFixed(6)} (±${Math.round(S.gps.acc)} m)${S.T && S.T.utm ? (() => { const e = UTM.fwd(S.gps.lat, S.gps.lon, S.T.utm.zone, S.T.utm.south); return `<br>UTM ${S.T.utm.zone}${S.T.utm.south ? 'S' : 'N'}: E ${fmtInt(e.E)} · N ${fmtInt(e.N)}`; })() : ''}</p>` : ''}
     <div class="row"><span class="sp"></span><button class="btn" id="dmClose">Fechar</button></div>`);
   $('#dmClose').onclick = closeSheet;
   $('#dmBack').onclick = () => { closeSheet(); $('#backBtn').click(); };
@@ -1713,16 +1925,20 @@ function openEditMenu() {
   const map = S.map, nOk = map.calib.filter(hasCoord).length;
   const calibList = map.calib.map((p, i) => `<button class="it" data-cal="${i}"><span class="badge">${i + 1}</span><span class="t">${hasCoord(p) ? `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}` : '<i>sem coordenada</i>'}</span>${p.err != null && S.T && S.T.meanErr != null ? `<span class="badge ${p.err < 5 ? 'good' : p.err < 15 ? 'mid' : 'bad'}">±${fmtM(p.err)}</span>` : ''}</button>`).join('');
   let calibTxt;
-  if (!S.T) calibTxt = 'O mapa ainda não está calibrado: sem isso não aparece a localização nem dá para medir.';
+  if (!S.T) calibTxt = hasScale(map) ? 'Falta marcar 1 ponto com coordenada conhecida para ligar o GPS.' : 'O mapa ainda não está calibrado: sem isso não aparece a localização (e, sem escala, não dá para medir).';
+  else if (S.T.utm) calibTxt = `Calibrado pela escala + ${S.T.n} ponto(s) · UTM fuso ${S.T.utm.zone}${S.T.meanErr != null ? ` · diferença média entre pontos ~${fmtM(S.T.meanErr)}` : ''}.`;
   else if (S.T.meanErr != null) calibTxt = `Calibrado com ${S.T.n} pontos · erro médio ~${fmtM(S.T.meanErr)}.`;
   else calibTxt = `Calibrado com ${S.T.n} pontos. Mais um ponto permite conferir a precisão.`;
   openSheet(`<h3>${esc(map.name)}</h3>
     <div class="grid2"><button class="btn" id="emRename">✏️ Renomear</button><button class="btn" id="emPreview">👁 Ver como tratorista</button></div>
+    <h4>Escala do mapa</h4>
+    <p class="muted small" style="margin-top:0">${scaleSummary(map)}</p>
+    <button class="btn wide ${hasScale(map) ? '' : 'primary'}" id="emScale">📏 Escala do mapa</button>
     <h4>Calibração · ${nOk} ponto(s)</h4>
     <p class="muted small" style="margin-top:0">${calibTxt}</p>
-    <button class="btn ${S.T ? '' : 'primary'} wide" id="emCalib">📐 Calibrar mapa</button>
+    <button class="btn ${S.T || !hasScale(map) ? '' : 'primary'} wide" id="emCalib">📐 Calibrar mapa</button>
     ${map.calib.length ? `<div class="list" style="margin-top:8px">${calibList}</div>` : ''}
-    <label class="chk"><input type="checkbox" id="emAff" ${map.affine ? 'checked' : ''} ${nOk < 3 ? 'disabled' : ''}><span>Ajuste livre — para mapas esticados ou fora de escala (precisa de 3+ pontos bem espalhados)</span></label>
+    ${hasScale(map) ? '' : `<label class="chk"><input type="checkbox" id="emAff" ${map.affine ? 'checked' : ''} ${nOk < 3 ? 'disabled' : ''}><span>Ajuste livre — para mapas esticados ou fora de escala (precisa de 3+ pontos bem espalhados)</span></label>`}
     <h4>UPs (${map.ups.length})</h4>
     ${upListHtml() || '<p class="muted small" style="margin:0">Use <b>Ajustar UPs</b> e toque nas áreas.</p>'}
     <h4>Observações (${map.labels.length})</h4>
@@ -1731,13 +1947,14 @@ function openEditMenu() {
     <div class="row"><button class="btn danger" id="emDel">Excluir mapa</button><span class="sp"></span><button class="btn" id="emClose">Fechar</button></div>`);
   $('#emClose').onclick = closeSheet;
   $('#emCalib').onclick = () => { closeSheet(); setMode('calib'); };
+  $('#emScale').onclick = openScaleSheet;
   $('#emJobs').onclick = openJobsList;
   $('#emComp').onclick = async () => { await toggleCompass(); openEditMenu(); };
   $('#emRename').onclick = async () => { const n = await askText('Nome do mapa', 'Ex.: Fazenda Boa Vista', map.name, 'Salvar'); if (n) { map.name = n; markDirty(); toast('Nome salvo'); } };
   $('#emPreview').onclick = async () => { closeSheet(); await saveWorkspaceMap(); const m = map; leaveMapSilently(); await openWorkspaceMap(m, 'drive'); };
   bindMenuLists(map.labels);
   $$('#sheetBody [data-cal]').forEach(b => b.onclick = () => { const p = map.calib[+b.dataset.cal]; closeSheet(); setMode('calib', true); setFollow(false); centerOn(p.x, p.y); openCalibSheet(p, false); });
-  $('#emAff').onchange = e => {
+  if ($('#emAff')) $('#emAff').onchange = e => {
     map.affine = e.target.checked; S.T = computeTransform(map);
     if (map.affine && S.T && S.T.affineFailed) toast('Os pontos estão quase alinhados; usando o ajuste normal.', 4500);
     markDirty(); updateUI(); openEditMenu();
@@ -1777,8 +1994,8 @@ async function renderAdmin() {
   const el = $('#adminList');
   if (!maps.length) { el.innerHTML = '<p class="muted small">Nenhum mapa ainda. Toque em <b>Novo mapa</b> e escolha o PDF.</p>'; return; }
   el.innerHTML = maps.map((m, i) => {
-    const cal = (m.calib || []).filter(hasCoord).length >= 2;
-    return `<div class="mapcard"><div class="mi">🗺️</div><div class="t"><b>${esc(m.name)}</b><span class="muted small">${(m.ups || []).length} UP(s) · editado ${fmtDate(m.updated)}</span><br>${cal ? '<span class="badge good">calibrado</span>' : '<span class="badge mid">sem calibração</span>'}
+    const cal = (m.calib || []).filter(hasCoord).length >= needPts(m);
+    return `<div class="mapcard"><div class="mi">🗺️</div><div class="t"><b>${esc(m.name)}</b><span class="muted small">${(m.ups || []).length} UP(s) · editado ${fmtDate(m.updated)}</span><br>${cal ? '<span class="badge good">calibrado</span>' : '<span class="badge mid">sem calibração</span>'} ${m.geo && m.geo.mPerPx > 0 ? `<span class="badge">1:${fmtInt(m.geo.ratio || 0) || '?'}</span>` : ''}
       <div class="acts"><button class="btn primary" data-ed="${i}">Editar</button><button class="btn" data-pv="${i}">👁 Testar</button></div></div></div>`;
   }).join('');
   $$('#adminList [data-ed]').forEach(b => b.onclick = () => openWorkspaceMap(maps[+b.dataset.ed], 'edit'));
@@ -1805,7 +2022,14 @@ async function fileToMapCanvas(f) {
     const c = document.createElement('canvas'); c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
     const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
     await page.render({ canvasContext: g, viewport: vp }).promise;
-    return c;
+    const k = c.width / vp1.width;   // pixels da imagem por ponto do PDF
+    let geo = null;
+    try {
+      const tc = await page.getTextContent(), d = detectPdfGeo(tc.items || []);
+      if (d.mPerPt) geo = { mPerPx: d.mPerPt / k, ratio: d.ratio, src: d.how, zone: d.zone, south: d.south, rotated: false };
+      else if (d.zone) geo = { mPerPx: 0, ratio: null, src: null, zone: d.zone, south: d.south, rotated: false };
+    } catch (e) { console.warn('texto do PDF', e); }
+    return { c, geo, paperMmPerPx: 25.4 / 72 / k };
   }
   if (!(f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(f.name))) throw new Error('escolha um PDF ou uma imagem');
   const url = URL.createObjectURL(f);
@@ -1814,7 +2038,7 @@ async function fileToMapCanvas(f) {
     const sc = Math.min(1, MAX_SIDE / Math.max(w, h), Math.sqrt(MAX_AREA / (w * h)));
     const c = document.createElement('canvas'); c.width = Math.round(w * sc); c.height = Math.round(h * sc);
     const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
-    return c;
+    return { c, geo: null, paperMmPerPx: null };
   } finally { URL.revokeObjectURL(url); }
 }
 $('#newMap').onclick = () => { const i = $('#fileInput'); i.value = ''; i.click(); };
@@ -1822,17 +2046,19 @@ $('#fileInput').onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   loading(true, 'Convertendo o mapa…');
   try {
-    const c = await fileToMapCanvas(f); if (!c) return;
+    const fc = await fileToMapCanvas(f); if (!fc) return;
+    const c = fc.c;
     const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
     const buf = await blob.arrayBuffer();
     loading(false);
     const name = await askText('Nome do mapa', 'Ex.: Fazenda Boa Vista — Talhão 3', f.name.replace(/\.[^.]+$/, ''), 'Criar mapa');
     if (!name) return;
-    const map = { id: uid(), name, created: Date.now(), updated: Date.now(), imgBuf: buf, imgType: 'image/jpeg', w: c.width, h: c.height, calib: [], affine: false, ups: [], labels: [] };
+    const map = { id: uid(), name, created: Date.now(), updated: Date.now(), imgBuf: buf, imgType: 'image/jpeg', w: c.width, h: c.height, calib: [], affine: false, ups: [], labels: [], geo: fc.geo, paperMmPerPx: fc.paperMmPerPx };
     await db.put('maps', map);
     await openWorkspaceMap(map, 'edit');
     setMode('calib');
-    toast('Mapa criado! Primeiro calibre: toque num ponto de coordenada conhecida.', 5000);
+    if (hasScale(map)) toast(`Escala lida do PDF: 1:${fmtInt(map.geo.ratio)}${map.geo.zone ? ` · UTM fuso ${map.geo.zone}${map.geo.south === false ? ' Norte' : ' Sul'}` : ''}. Agora marque 1 ponto para ligar o GPS.`, 7000);
+    else toast('Mapa criado! Defina a escala (menu ☰ → Escala) ou marque 2 pontos para calibrar.', 6000);
   } catch (err) { console.error(err); toast('Não consegui abrir: ' + (err.message || err), 6000); }
   finally { loading(false); }
 };
@@ -1868,7 +2094,7 @@ function makeZip(files) {
 }
 function publishedMeta(m) {
   return {
-    id: m.id, name: m.name, updated: m.updated, w: m.w, h: m.h, affine: !!m.affine,
+    id: m.id, name: m.name, updated: m.updated, w: m.w, h: m.h, affine: !!m.affine, geo: m.geo || null, paperMmPerPx: m.paperMmPerPx || null,
     calib: (m.calib || []).filter(hasCoord).map(p => ({ id: p.id, x: p.x, y: p.y, lat: p.lat, lon: p.lon })),
     ups: (m.ups || []).map(u => ({ id: u.id, name: u.name, color: u.color, mask: u.mask, parts: u.parts, area: u.area, cx: u.cx, cy: u.cy })),
     labels: m.labels || []
@@ -1886,7 +2112,7 @@ $('#exportPkg').onclick = async () => {
       const base = `mapas/${m.id}_${m.updated.toString(36)}`;
       files.push({ name: base + '.json', data: enc.encode(JSON.stringify(publishedMeta(m))) });
       files.push({ name: base + '.jpg', data: new Uint8Array(m.imgBuf) });
-      const cal = (m.calib || []).filter(hasCoord).length >= 2;
+      const cal = (m.calib || []).filter(hasCoord).length >= needPts(m);
       if (!cal) warns.push(`“${m.name}” está sem calibração: o tratorista não verá a posição nem poderá medir.`);
       if (!(m.ups || []).length) warns.push(`“${m.name}” não tem nenhuma UP marcada.`);
       index.maps.push({ id: m.id, name: m.name, updated: m.updated, json: base + '.json', img: base + '.jpg', ups: (m.ups || []).length, calibrated: cal, bytes: m.imgBuf.byteLength });
@@ -2004,7 +2230,7 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !(SI
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 }
 window.addEventListener('online', () => { if (S.screen === 'home') renderHome(); });
-window.__mapaGps = { S, computeTransform, geoToMap, mapToGeo, parseCoords, floodUp, polyMetrics };
+window.__mapaGps = { S, computeTransform, geoToMap, mapToGeo, parseCoords, parseCoordsAny, floodUp, polyMetrics, UTM, detectPdfGeo, mapToUtm };
 resize();
 renderHome();
 })();
