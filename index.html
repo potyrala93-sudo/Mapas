@@ -175,17 +175,8 @@ pre.sum{white-space:pre-wrap;font:inherit;font-size:14px;background:#f8fafc;bord
   <button class="btn primary wide" id="newMap">＋ Novo mapa (PDF ou imagem)</button>
   <h2>Mapas deste aparelho</h2>
   <div id="adminList"></div>
-  <h2>Publicar no GitHub</h2>
-  <div class="panel">
-    <ol class="small">
-      <li>Toque em <b>Gerar pacote</b> e descompacte o arquivo baixado.</li>
-      <li>No GitHub, abra o repositório do app → <b>Add file → Upload files</b>.</li>
-      <li>Arraste <b>tudo que está dentro</b> da pasta <b>mapa-gps</b> (inclusive a pasta <b>mapas</b>) e clique em <b>Commit changes</b>.</li>
-      <li>Em 1 a 2 minutos o site atualiza. Os celulares pegam os mapas novos ao abrir o app com internet e depois funcionam <b>sem internet</b>.</li>
-    </ol>
-    <button class="btn primary wide" id="exportPkg">📦 Gerar pacote para o site</button>
-    <button class="btn wide" id="importSite" style="margin-top:8px">⬇️ Trazer os mapas publicados para editar</button>
-  </div>
+  <h2>Publicar para os tratoristas</h2>
+  <div class="panel" id="pubPanel"></div>
 </div></div>
 
 <div id="backdrop" class="hidden"></div>
@@ -541,7 +532,9 @@ async function openMap(map, role, imgSrc) {
   renderMeas(); updateUI();
 }
 async function leaveMap() {
+  const edited = S.role === 'edit' && S.map && S.map.updated > (S.openedAt || 0);
   if (S.role === 'edit') await saveWorkspaceMap();
+  if (edited) setTimeout(() => toast('Alterações salvas neste aparelho. Toque em “Publicar agora” para enviar aos tratoristas.', 5000), 300);
   leaveMapSilently();
   if (S.backTo === 'admin') renderAdmin(); else renderHome();
 }
@@ -1982,7 +1975,7 @@ async function saveWorkspaceMap() {
 async function openWorkspaceMap(map, role = 'edit') {
   loading(true, 'Abrindo mapa…');
   try {
-    S.backTo = 'admin'; S.dirty = false;
+    S.backTo = 'admin'; S.dirty = false; S.openedAt = Date.now();
     await openMap(map, role, URL.createObjectURL(new Blob([map.imgBuf], { type: map.imgType || 'image/jpeg' })));
   } catch (e) { toast('Não consegui abrir: ' + e.message, 5000); renderAdmin(); }
   finally { loading(false); }
@@ -1991,11 +1984,12 @@ async function renderAdmin() {
   showScreen('admin');
   let maps = []; try { maps = await db.all('maps'); } catch (e) { toast('Este navegador não permite salvar dados.'); }
   maps.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  const { st } = await renderPublishPanel(maps);
   const el = $('#adminList');
   if (!maps.length) { el.innerHTML = '<p class="muted small">Nenhum mapa ainda. Toque em <b>Novo mapa</b> e escolha o PDF.</p>'; return; }
   el.innerHTML = maps.map((m, i) => {
     const cal = (m.calib || []).filter(hasCoord).length >= needPts(m);
-    return `<div class="mapcard"><div class="mi">🗺️</div><div class="t"><b>${esc(m.name)}</b><span class="muted small">${(m.ups || []).length} UP(s) · editado ${fmtDate(m.updated)}</span><br>${cal ? '<span class="badge good">calibrado</span>' : '<span class="badge mid">sem calibração</span>'} ${m.geo && m.geo.mPerPx > 0 ? `<span class="badge">1:${fmtInt(m.geo.ratio || 0) || '?'}</span>` : ''}
+    return `<div class="mapcard"><div class="mi">🗺️</div><div class="t"><b>${esc(m.name)}</b><span class="muted small">${(m.ups || []).length} UP(s) · editado ${fmtDate(m.updated)}</span><br>${cal ? '<span class="badge good">calibrado</span>' : '<span class="badge mid">sem calibração</span>'} ${!st || !st.maps || st.maps[m.id] !== m.updated ? '<span class="badge bad">não publicado</span>' : '<span class="badge good">publicado</span>'} ${m.geo && m.geo.mPerPx > 0 ? `<span class="badge">1:${fmtInt(m.geo.ratio || 0) || '?'}</span>` : ''}
       <div class="acts"><button class="btn primary" data-ed="${i}">Editar</button><button class="btn" data-pv="${i}">👁 Testar</button></div></div></div>`;
   }).join('');
   $$('#adminList [data-ed]').forEach(b => b.onclick = () => openWorkspaceMap(maps[+b.dataset.ed], 'edit'));
@@ -2094,31 +2088,34 @@ function makeZip(files) {
 }
 function publishedMeta(m) {
   return {
-    id: m.id, name: m.name, updated: m.updated, w: m.w, h: m.h, affine: !!m.affine, geo: m.geo || null, paperMmPerPx: m.paperMmPerPx || null,
+    id: m.id, name: m.name, updated: m.updated, created: m.created || 0, w: m.w, h: m.h, affine: !!m.affine, geo: m.geo || null, paperMmPerPx: m.paperMmPerPx || null,
     calib: (m.calib || []).filter(hasCoord).map(p => ({ id: p.id, x: p.x, y: p.y, lat: p.lat, lon: p.lon })),
     ups: (m.ups || []).map(u => ({ id: u.id, name: u.name, color: u.color, mask: u.mask, parts: u.parts, area: u.area, cx: u.cx, cy: u.cy })),
     labels: m.labels || []
   };
 }
-$('#exportPkg').onclick = async () => {
+function buildPackage(maps) {
+  const enc = new TextEncoder(), files = [], warns = [];
+  const index = { app: 'mapa-gps', version: 3, published: new Date().toISOString(), maps: [] };
+  for (const m of maps) {
+    const base = `mapas/${m.id}_${m.updated.toString(36)}`, img = `mapas/${m.id}_img_${(m.created || 0).toString(36)}.jpg`;  // a imagem não muda depois de criada
+    files.push({ name: base + '.json', data: enc.encode(JSON.stringify(publishedMeta(m))) });
+    files.push({ name: img, data: new Uint8Array(m.imgBuf) });
+    const cal = (m.calib || []).filter(hasCoord).length >= needPts(m);
+    if (!cal) warns.push(`“${m.name}” está sem calibração: o tratorista não verá a posição dele.`);
+    if (!(m.ups || []).length) warns.push(`“${m.name}” não tem nenhuma UP marcada.`);
+    index.maps.push({ id: m.id, name: m.name, updated: m.updated, json: base + '.json', img, ups: (m.ups || []).length, calibrated: cal, bytes: m.imgBuf.byteLength });
+  }
+  index.maps.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  files.push({ name: 'mapas/index.json', data: enc.encode(JSON.stringify(index, null, 1)) });
+  return { files, index, warns };
+}
+async function exportPackage() {
   let maps = []; try { maps = await db.all('maps'); } catch (e) { }
   if (!maps.length) { toast('Crie pelo menos um mapa antes de publicar.'); return; }
   loading(true, 'Gerando pacote…');
   try {
-    const enc = new TextEncoder(), files = [];
-    const index = { app: 'mapa-gps', version: 3, published: new Date().toISOString(), maps: [] };
-    const warns = [];
-    for (const m of maps) {
-      const base = `mapas/${m.id}_${m.updated.toString(36)}`;
-      files.push({ name: base + '.json', data: enc.encode(JSON.stringify(publishedMeta(m))) });
-      files.push({ name: base + '.jpg', data: new Uint8Array(m.imgBuf) });
-      const cal = (m.calib || []).filter(hasCoord).length >= needPts(m);
-      if (!cal) warns.push(`“${m.name}” está sem calibração: o tratorista não verá a posição nem poderá medir.`);
-      if (!(m.ups || []).length) warns.push(`“${m.name}” não tem nenhuma UP marcada.`);
-      index.maps.push({ id: m.id, name: m.name, updated: m.updated, json: base + '.json', img: base + '.jpg', ups: (m.ups || []).length, calibrated: cal, bytes: m.imgBuf.byteLength });
-    }
-    index.maps.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-    files.push({ name: 'mapas/index.json', data: enc.encode(JSON.stringify(index, null, 1)) });
+    const { files, warns } = buildPackage(maps);
     let appOk = true;
     for (const f of ['index.html', 'sw.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png']) {
       try { const r = await fetch(f, { cache: 'no-cache' }); if (!r.ok) throw 0; files.push({ name: f, data: new Uint8Array(await r.arrayBuffer()) }); } catch (e) { appOk = false; }
@@ -2127,17 +2124,16 @@ $('#exportPkg').onclick = async () => {
     download(makeZip(files.map(f => ({ name: 'mapa-gps/' + f.name, data: f.data }))), 'mapa-gps-site.zip');
     loading(false);
     openSheet(`<h3>Pacote gerado ✓</h3>
-      <p>Baixei o arquivo <b>mapa-gps-site.zip</b> com ${maps.length} mapa(s).</p>
-      <ol class="small" style="padding-left:18px"><li>Descompacte o arquivo.</li><li>No GitHub, abra o repositório do app → <b>Add file → Upload files</b>.</li><li>Arraste <b>tudo que está dentro</b> da pasta <b>mapa-gps</b> (inclusive a pasta <b>mapas</b>) e clique em <b>Commit changes</b>.</li><li>Em 1 a 2 minutos o site atualiza. Os celulares pegam os mapas novos ao abrir o app com internet.</li></ol>
-      ${SIM && window.self !== window.top ? '<div class="warnbox">Aqui no modo teste o navegador bloqueia downloads. No site de verdade o pacote é baixado normalmente.</div>' : ''}
-      ${appOk ? '' : '<div class="warnbox">Não consegui incluir os arquivos do app no pacote (você abriu o app fora do site). Envie só a pasta <b>mapas</b> para o repositório.</div>'}
+      <p>Baixei o arquivo <b>mapa-gps-site.zip</b> com ${maps.length} mapa(s). Para enviar à mão: descompacte, abra o repositório no GitHub → <b>Add file → Upload files</b>, arraste tudo que está dentro da pasta e clique em <b>Commit changes</b>.</p>
+      ${SIM && window.self !== window.top ? '<div class="warnbox">Aqui no modo teste o navegador bloqueia downloads.</div>' : ''}
+      ${appOk ? '' : '<div class="warnbox">Não consegui incluir os arquivos do app no pacote (você abriu o app fora do site). Envie só a pasta <b>mapas</b>.</div>'}
       ${warns.length ? `<div class="warnbox">${warns.map(esc).join('<br>')}</div>` : ''}
       <div class="row"><span class="sp"></span><button class="btn primary" id="pkok">OK</button></div>`);
     $('#pkok').onclick = closeSheet;
   } catch (e) { console.error(e); toast('Erro ao gerar o pacote: ' + e.message, 5000); }
   finally { loading(false); }
-};
-$('#importSite').onclick = async () => {
+}
+async function importFromSite() {
   let idx;
   try { idx = await fetchJSON('mapas/index.json'); } catch (e) { toast('Não encontrei mapas publicados neste endereço.', 4000); return; }
   if (!idx.maps || !idx.maps.length) { toast('Ainda não há mapas publicados.'); return; }
@@ -2145,17 +2141,151 @@ $('#importSite').onclick = async () => {
   const ids = new Set(local.map(m => m.id)), clash = idx.maps.filter(m => ids.has(m.id)).length;
   if (clash && !(await confirmSheet(`${clash} mapa(s) já existem neste aparelho e serão substituídos pela versão publicada.`, 'Substituir'))) return;
   loading(true, 'Baixando mapas publicados…');
-  let ok = 0;
+  let ok = 0, st = null;
+  try { st = (await db.get('kv', 'pubState')) || { at: Date.now(), maps: {} }; } catch (e) { st = { at: Date.now(), maps: {} }; }
   try {
     for (const e of idx.maps) {
       try {
         const meta = await fetchJSON(e.json, 20000), r = await fetch(e.img); if (!r.ok) throw 0;
         await db.put('maps', { ...meta, created: meta.created || Date.now(), imgBuf: await r.arrayBuffer(), imgType: 'image/jpeg' }); ok++;
+        st.maps[meta.id] = meta.updated;
       } catch (err) { console.warn(err); }
     }
+    await db.put('kv', st, 'pubState').catch(() => { });
   } finally { loading(false); }
   toast(`${ok} mapa(s) trazidos para edição.`); renderAdmin();
-};
+}
+
+/* --- publicação direta no GitHub (sem precisar entrar no site do GitHub) --- */
+async function ghGet() { try { return await db.get('kv', 'gh'); } catch (e) { return null; } }
+function guessRepo() {
+  const h = location.hostname; if (!/\.github\.io$/i.test(h)) return '';
+  const owner = h.split('.')[0], seg = location.pathname.split('/').filter(Boolean)[0];
+  return owner + '/' + (seg && !/\.html?$/i.test(seg) ? seg : h);
+}
+function ghErrText(st, msg) {
+  if (st === 401) return 'Token inválido ou vencido. Gere um novo token no GitHub e salve de novo em “Conexão”.';
+  if (st === 403) return 'O token não tem permissão para gravar neste repositório (precisa da permissão Contents: Read and write).' + (msg ? ' (' + msg + ')' : '');
+  if (st === 404) return 'Repositório não encontrado. Confira o nome (usuário/repositório) e se o token tem acesso a ele.';
+  if (st === 409) return 'O repositório está vazio. Envie primeiro os arquivos do app (passo a passo de instalação).';
+  if (st === 422) return 'O GitHub recusou os dados: ' + msg;
+  return `Erro do GitHub (${st})${msg ? ': ' + msg : ''}`;
+}
+async function ghApi(cfg, path, method = 'GET', body) {
+  let r;
+  try {
+    r = await fetch('https://api.github.com/repos/' + cfg.repo + path, {
+      method, cache: 'no-store',
+      headers: { 'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + cfg.token, 'X-GitHub-Api-Version': '2022-11-28', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (e) { throw new Error('Sem internet ou o GitHub não respondeu. Tente de novo.'); }
+  if (!r.ok) { let msg = ''; try { msg = (await r.json()).message || ''; } catch (e) { } const err = new Error(ghErrText(r.status, msg)); err.status = r.status; throw err; }
+  return r.status === 204 ? null : r.json();
+}
+function bufToB64(data) {
+  return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(fr.error); fr.readAsDataURL(new Blob([data])); });
+}
+async function publishToGitHub() {
+  const cfg = await ghGet(); if (!cfg || !cfg.token) { openGhSheet(); return; }
+  let maps = []; try { maps = await db.all('maps'); } catch (e) { }
+  if (S.map && S.role === 'edit') await saveWorkspaceMap();
+  try { maps = await db.all('maps'); } catch (e) { }
+  if (!maps.length && !(await confirmSheet('Não há nenhum mapa neste aparelho. Publicar assim vai tirar todos os mapas do site.', 'Publicar mesmo assim'))) return;
+  const pkg = buildPackage(maps);
+  loading(true, 'Conectando ao GitHub…');
+  try {
+    const repo = await ghApi(cfg, '');
+    if (repo.permissions && repo.permissions.push === false) throw new Error('Este token não pode gravar no repositório (precisa da permissão Contents: Read and write).');
+    const branch = cfg.branch || repo.default_branch || 'main';
+    const ref = await ghApi(cfg, '/git/ref/heads/' + encodeURIComponent(branch));
+    const headSha = ref.object.sha;
+    const commit = await ghApi(cfg, '/git/commits/' + headSha);
+    const tr = await ghApi(cfg, '/git/trees/' + commit.tree.sha + '?recursive=1');
+    const existing = new Map((tr.tree || []).filter(t => t.type === 'blob').map(t => [t.path, t.sha]));
+    const entries = [], send = pkg.files.filter(f => f.name === 'mapas/index.json' || !existing.has(f.name));
+    let i = 0;
+    for (const f of send) {
+      i++; loading(true, `Enviando arquivo ${i} de ${send.length}…`);
+      const blob = await ghApi(cfg, '/git/blobs', 'POST', { content: await bufToB64(f.data), encoding: 'base64' });
+      entries.push({ path: f.name, mode: '100644', type: 'blob', sha: blob.sha });
+    }
+    const keep = new Set(pkg.files.map(f => f.name));
+    for (const [path] of existing) if (path.startsWith('mapas/') && !keep.has(path)) entries.push({ path, mode: '100644', type: 'blob', sha: null });
+    loading(true, 'Gravando no GitHub…');
+    const tree = await ghApi(cfg, '/git/trees', 'POST', { base_tree: commit.tree.sha, tree: entries });
+    const nc = await ghApi(cfg, '/git/commits', 'POST', { message: `Mapas atualizados pelo app (${maps.length} mapa${maps.length === 1 ? '' : 's'})`, tree: tree.sha, parents: [headSha] });
+    await ghApi(cfg, '/git/refs/heads/' + encodeURIComponent(branch), 'PATCH', { sha: nc.sha });
+    await db.put('kv', { at: Date.now(), maps: Object.fromEntries(maps.map(m => [m.id, m.updated])) }, 'pubState');
+    loading(false);
+    openSheet(`<h3>Publicado ✓</h3><p>${maps.length} mapa(s) enviados para <b>${esc(cfg.repo)}</b>. Em 1 a 3 minutos o site atualiza, e os celulares recebem os mapas ao abrir o app com internet.</p>
+      ${pkg.warns.length ? `<div class="warnbox">${pkg.warns.map(esc).join('<br>')}</div>` : ''}
+      <div class="row"><span class="sp"></span><button class="btn primary" id="pbok">OK</button></div>`);
+    $('#pbok').onclick = () => { closeSheet(); if (S.screen === 'admin') renderAdmin(); };
+  } catch (e) {
+    loading(false); console.error(e);
+    openSheet(`<h3>Não consegui publicar</h3><p>${esc(e.message || e)}</p><p class="muted small">Seus mapas continuam salvos neste aparelho.</p>
+      <div class="row"><button class="btn" id="pbcfg">⚙️ Conexão</button><span class="sp"></span><button class="btn primary" id="pbok">OK</button></div>`);
+    $('#pbok').onclick = closeSheet; $('#pbcfg').onclick = () => { closeSheet(); openGhSheet(); };
+  }
+}
+async function openGhSheet() {
+  const cfg = (await ghGet()) || {};
+  openSheet(`<h3>☁️ Conectar ao GitHub</h3>
+    <p class="muted small" style="margin-top:-4px">Feito <b>uma vez</b> neste aparelho. Depois é só tocar em <b>Publicar agora</b>.</p>
+    <div class="field"><label>Repositório (usuário/nome)</label><input type="text" id="ghRepo" placeholder="seu-usuario/mapa-gps" value="${esc(cfg.repo || guessRepo())}" autocapitalize="off" autocomplete="off" spellcheck="false"></div>
+    <div class="field"><label>Token de acesso</label><input type="password" id="ghTok" placeholder="${cfg.token ? '•••••• já salvo (deixe em branco para manter)' : 'github_pat_…'}" autocomplete="off"></div>
+    <details class="small"><summary><b>Como criar o token</b></summary><ol style="padding-left:18px;margin:8px 0">
+      <li>No GitHub, clique na sua foto (canto superior direito) → <b>Settings</b>.</li>
+      <li>No fim do menu da esquerda: <b>Developer settings</b> → <b>Personal access tokens</b> → <b>Fine-grained tokens</b> → <b>Generate new token</b>.</li>
+      <li>Dê um nome (ex.: Mapa GPS) e escolha a validade (ex.: 1 ano).</li>
+      <li>Em <b>Repository access</b>, escolha <b>Only select repositories</b> e marque o repositório do app.</li>
+      <li>Em <b>Permissions</b>, dê a permissão <b>Contents</b> como <b>Read and write</b>.</li>
+      <li>Clique em <b>Generate token</b>, copie o código (começa com <b>github_pat_</b>) e cole aqui.</li></ol></details>
+    <p class="muted small">O token fica guardado só neste aparelho. Não coloque nos celulares dos tratoristas.</p>
+    <div id="ghMsg" class="small"></div>
+    <div class="row">${cfg.token ? '<button class="btn danger" id="ghDel">Desconectar</button>' : ''}<span class="sp"></span><button class="btn" id="ghNo">Cancelar</button><button class="btn primary" id="ghOk">Testar e salvar</button></div>`);
+  $('#ghNo').onclick = closeSheet;
+  if ($('#ghDel')) $('#ghDel').onclick = async () => { await db.del('kv', 'gh').catch(() => { }); closeSheet(); toast('Desconectado do GitHub.'); renderAdmin(); };
+  $('#ghOk').onclick = async () => {
+    const repo = $('#ghRepo').value.trim().replace(/^https?:\/\/(www\.)?github\.com\//i, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+    const token = $('#ghTok').value.trim() || cfg.token;
+    const msg = $('#ghMsg');
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { msg.innerHTML = '⚠️ Escreva o repositório como <b>usuário/nome</b> (ex.: joao/mapa-gps).'; return; }
+    if (!token) { msg.innerHTML = '⚠️ Cole o token de acesso.'; return; }
+    msg.textContent = 'Testando…'; $('#ghOk').disabled = true;
+    try {
+      const r = await ghApi({ repo, token }, '');
+      if (r.permissions && r.permissions.push === false) throw new Error('Este token só consegue ler o repositório. Dê a permissão Contents: Read and write.');
+      await db.put('kv', { repo: r.full_name || repo, token, branch: r.default_branch || 'main' }, 'gh');
+      closeSheet(); toast('Conectado ao GitHub ✓ Agora é só tocar em Publicar.', 4500); renderAdmin();
+    } catch (e) { msg.innerHTML = '⚠️ ' + esc(e.message); $('#ghOk').disabled = false; }
+  };
+}
+async function renderPublishPanel(maps) {
+  const cfg = await ghGet(); let st = null; try { st = await db.get('kv', 'pubState'); } catch (e) { }
+  const pend = maps.filter(m => !st || !st.maps || st.maps[m.id] !== m.updated).length;
+  const removed = st && st.maps ? Object.keys(st.maps).filter(id => !maps.some(m => m.id === id)).length : 0;
+  let html = '';
+  if (cfg && cfg.token) {
+    html += `<div class="small" style="margin-bottom:10px">Conectado a <b>${esc(cfg.repo)}</b>${st ? ` · última publicação ${fmtDate(st.at)}` : ''}</div>`;
+    if (pend || removed) html += `<div class="warnbox" style="margin:0 0 10px">${pend ? `${pend} mapa(s) com alterações ainda não publicadas.` : ''}${removed ? ` ${removed} mapa(s) excluído(s) ainda aparecem para os tratoristas.` : ''}</div>`;
+    else if (st) html += `<div class="small" style="color:#166534;margin-bottom:10px">✓ Tudo publicado.</div>`;
+    html += `<button class="btn primary wide" id="pubGo">☁️ Publicar agora</button>
+      <div class="grid2" style="margin-top:8px"><button class="btn" id="pubCfg">⚙️ Conexão</button><button class="btn" id="importSite">⬇️ Trazer do site</button></div>`;
+  } else {
+    html += `<p class="small" style="margin-top:0">Conecte o app ao repositório do GitHub <b>uma vez</b>. Depois, é só tocar em <b>Publicar agora</b>: os mapas vão direto para o site, sem precisar entrar no GitHub.</p>
+      <button class="btn primary wide" id="pubCfg">☁️ Conectar ao GitHub</button>
+      <button class="btn wide" id="importSite" style="margin-top:8px">⬇️ Trazer os mapas publicados para editar</button>`;
+  }
+  html += `<div style="text-align:center"><button class="linkbtn" id="exportPkg">Baixar pacote .zip (envio manual)</button></div>`;
+  $('#pubPanel').innerHTML = html;
+  if ($('#pubGo')) $('#pubGo').onclick = publishToGitHub;
+  $('#pubCfg').onclick = openGhSheet;
+  $('#importSite').onclick = importFromSite;
+  $('#exportPkg').onclick = exportPackage;
+  return { st, cfg };
+}
 
 /* ================= tela inicial (tratorista) ================= */
 async function renderHome() {
