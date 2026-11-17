@@ -124,6 +124,11 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .list .it{display:flex;align-items:center;gap:10px;padding:11px 12px;border-top:1px solid var(--line);width:100%;text-align:left}
 .list .it:first-child{border-top:0}
 .list .it .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list div.it{padding:4px 6px 4px 12px}
+.list .itm{display:flex;align-items:center;gap:10px;flex:1;min-width:0;text-align:left;padding:7px 0}
+.list .del{width:40px;height:40px;border-radius:10px;flex:none;font-size:17px}
+.list .del:active{background:#fef2f2}
+.linkdanger{color:var(--danger);font-size:14px;padding:8px 4px;font-weight:600}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .sumbig{font-size:34px;font-weight:800;letter-spacing:-.02em;margin:2px 0 6px}
 pre.sum{white-space:pre-wrap;font:inherit;font-size:14px;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:10px 0 0;overflow-wrap:anywhere}
@@ -1227,6 +1232,36 @@ function openUpNameSheet(up, isNew, onSave) {
   setTimeout(() => $('#un').focus(), 60);
 }
 
+/* --- excluir --- */
+function removeUpNow(up) {
+  const i = S.map.ups.indexOf(up); if (i >= 0) S.map.ups.splice(i, 1);
+  S.upCache.delete(up.id);
+  if (S.sel && S.sel.up === up) S.sel = null;
+  if (S.pick && S.pick.target === up) pickStart(null);
+  if (S.hideUpId === up.id) S.hideUpId = null;
+}
+async function deleteUp(up) {
+  if (!(await confirmSheet(`Excluir a UP “${up.name || 'sem nome'}” e todas as áreas dela? Isso não pode ser desfeito.`, 'Excluir UP'))) return false;
+  removeUpNow(up); rebuildOverlay(); markDirty(); renderCtx(); updateStatus(); requestDraw();
+  toast('UP excluída'); return true;
+}
+async function deleteAllUps() {
+  const n = S.map.ups.length; if (!n) return;
+  if (!(await confirmSheet(`Excluir as ${n} UPs deste mapa? O mapa, a calibração e as observações continuam. Isso não pode ser desfeito.`, 'Excluir todas'))) return;
+  S.map.ups = []; S.upCache = new Map(); S.sel = null; S.hideUpId = null; if (S.pick) pickStart(null);
+  rebuildOverlay(); markDirty(); renderCtx(); updateStatus(); toast('Todas as UPs foram excluídas');
+}
+async function deleteObs(o) {
+  if (!(await confirmSheet(`Excluir a observação “${(o.text || '').split('\n')[0].slice(0, 40)}”?`, 'Excluir'))) return false;
+  for (const list of [S.map.labels, S.obsLocal]) { const i = list.indexOf(o); if (i >= 0) list.splice(i, 1); }
+  S.selected = null; saveObs(); requestDraw(); toast('Observação excluída'); return true;
+}
+async function deleteAllObs() {
+  const list = obsList(), n = list.length; if (!n) return;
+  if (!(await confirmSheet(`Excluir ${n === 1 ? 'a observação' : 'as ' + n + ' observações'} ${S.role === 'edit' ? 'deste mapa' : 'que você fez neste mapa'}?`, 'Excluir todas'))) return;
+  list.splice(0, list.length); saveObs(); requestDraw(); toast('Observações excluídas');
+}
+
 /* --- Ajustar UPs: marcar várias áreas e nomear como uma UP --- */
 function upParts(up) {
   const list = up.parts && up.parts.length ? up.parts : [up.mask];
@@ -1319,6 +1354,7 @@ function renderCtx() {
     html = `<div class="uphead"><span class="upsw" style="background:${PICK_COLOR}"></span><div class="upinfo"><b>${P.target ? 'Editando áreas: ' + esc(P.target.name || 'UP') : 'Nova UP'}</b><div class="muted small" id="pSub">${pickSubText()}</div></div>${P.parts.length || P.target ? '<button class="upclose" id="pX" aria-label="Cancelar">✕</button>' : ''}</div>`;
     if (draw) html += `<div class="upact"><button class="btn" id="dUndo" ${S.poly.length ? '' : 'disabled'}>↶ Desfazer</button><button class="btn" id="dDone" ${S.poly.length >= 3 ? '' : 'disabled'}>➕ Concluir área</button></div>`;
     html += `<div class="upact"><button class="btn primary" id="pSave" ${P.parts.length ? '' : 'disabled'}>${P.target ? '💾 Salvar áreas' : '🏷️ Nomear como UP'}</button>${draw ? '' : '<button class="btn" id="pAdj">⚙️ Ajustar</button>'}</div>`;
+    if (P.parts.length > 1 || P.target) html += `<div style="display:flex;justify-content:space-between;margin-top:2px">${P.parts.length > 1 ? '<button class="linkdanger" id="pClearAll">Desmarcar todas as áreas</button>' : '<span></span>'}${P.target ? '<button class="linkdanger" id="pDelUp">🗑 Excluir esta UP</button>' : ''}</div>`;
     if (!draw) html += `<div class="upadj ${S.adjOpen ? '' : 'hidden'}" id="uAdjBox">
       <div class="field"><label>Sensibilidade de cor <span class="muted" id="uTolV">${S.lastTol}</span></label><input type="range" id="uTol" min="8" max="140" step="1" value="${S.lastTol}"></div>
       <div class="field"><label>Fechar falhas na borda <span class="muted" id="uGapV">${S.lastGap ? S.lastGap + ' px' : 'desligado'}</span></label><input type="range" id="uGap" min="0" max="8" step="1" value="${S.lastGap}"></div>
@@ -1326,7 +1362,7 @@ function renderCtx() {
   } else if (S.sel) {
     const { up, res } = S.sel;
     html = `<div class="uphead"><span class="upsw" style="background:${up.color}"></span><div class="upinfo"><b>${esc(up.name || 'UP sem nome')}</b><div class="muted small" id="uSub">${upInfoSub(up, res)}</div></div><button class="upclose" id="uClose" aria-label="Fechar">✕</button></div>`;
-    if (edit) html += `<div class="upact"><button class="btn" id="uEdit">✏️ Nome e cor</button><button class="btn" id="uAreas">🧩 Editar áreas</button></div>`;
+    if (edit) html += `<div class="upact"><button class="btn" id="uEdit">✏️ Nome e cor</button><button class="btn" id="uAreas">🧩 Áreas</button><button class="btn danger" id="uDel" style="flex:0 0 auto">🗑 Excluir</button></div>`;
   } else if (S.mode === 'measure' && S.mKind === 'desenho') {
     const n = S.mdraw.length, mt = polyMetrics(S.mdraw);
     html = `<div class="mhead"><b>✏️ Medir desenhando</b><span class="sp" style="flex:1"></span><span class="muted small">${n} ponto(s)</span></div>`;
@@ -1368,6 +1404,9 @@ function bindCtx() {
   if ($('#uTol')) { $('#uTol').addEventListener('input', onPickAdjust); $('#uGap').addEventListener('input', onPickAdjust); }
   on('uClose', clearSel);
   on('uEdit', () => { const up = S.sel.up; openUpNameSheet(up, false, () => { if (S.sel && S.sel.up === up) S.sel.ov = makeOverlay(S.sel.res, up.color); rebuildOverlay(); markDirty(); renderCtx(); updateStatus(); toast('UP atualizada ✓'); }); });
+  on('uDel', () => deleteUp(S.sel.up));
+  on('pDelUp', () => deleteUp(S.pick.target));
+  on('pClearAll', () => { S.pick.parts = []; S.pick.last = null; S.pick.err = null; pickChanged(); toast('Todas as áreas desmarcadas'); });
   on('uAreas', () => { const up = S.sel.up; S.upMode = 'auto'; setMode('up', true); pickStart(up); renderCtx(); renderModeBar(); requestDraw(); showHint('upedit'); });
   on('mdUndo', () => { S.mdraw.pop(); renderCtx(); requestDraw(); });
   on('mdClear', () => { S.mdraw = []; renderCtx(); requestDraw(); });
@@ -1434,10 +1473,11 @@ function openObsView(o) {
   S.selected = o.id; requestDraw();
   openSheet(`<h3>📝 Observação</h3><pre class="sum" style="margin-top:0;font-size:15px">${esc(o.text)}</pre>
     <p class="muted small">${o.created ? fmtDate(o.created) : ''}${obsGeoText(o) ? ' · ' + obsGeoText(o) : ''}${editable ? '' : ' · do gestor'}</p>
-    <div class="row"><button class="btn" id="vshare">📤 Enviar</button>${editable ? '<button class="btn" id="vedit">✏️ Editar</button>' : ''}<span class="sp"></span><button class="btn primary" id="vclose">Fechar</button></div>`, () => { S.selected = null; requestDraw(); });
+    <div class="row"><button class="btn" id="vshare">📤 Enviar</button>${editable ? '<button class="btn" id="vedit">✏️ Editar</button><button class="btn danger" id="vdel">🗑</button>' : ''}<span class="sp"></span><button class="btn primary" id="vclose">Fechar</button></div>`, () => { S.selected = null; requestDraw(); });
   $('#vclose').onclick = () => { closeSheet(); S.selected = null; requestDraw(); };
   $('#vshare').onclick = () => shareText(obsShareText(o));
   if (editable) $('#vedit').onclick = () => { closeSheet(); openObsEditor(o, false); };
+  if (editable) $('#vdel').onclick = async () => { closeSheet(); await deleteObs(o); };
 }
 function obsAtMyLocation() {
   if (!S.T) { toast('O mapa precisa estar calibrado para usar a sua localização.'); return; }
@@ -1930,10 +1970,20 @@ async function openJobsList() {
   let jobs = []; try { jobs = await db.all('jobs'); } catch (e) { }
   jobs.sort((a, b) => b.start - a.start);
   const ic = { trabalho: '🚜', contorno: '🚶', desenho: '✏️' };
-  openSheet(`<h3>Histórico de medições</h3>${jobs.length ? `<div class="list">${jobs.map((j, i) => `<button class="it" data-j="${i}"><span style="font-size:20px">${ic[j.type || 'trabalho']}</span><span class="t"><b>${fmtHa(j.areaM2)}</b> · ${esc(j.name || j.mapName)}<br><span class="muted small">${esc(j.name ? j.mapName + ' · ' : '')}${fmtDate(j.start)}</span></span><span class="muted">›</span></button>`).join('')}</div>` : '<p class="muted">Nenhuma medição salva neste aparelho.</p>'}
-    <div class="row"><span class="sp"></span><button class="btn" id="jlc">Fechar</button></div>`);
+  openSheet(`<h3>Histórico de medições</h3>${jobs.length ? `<div class="list">${jobs.map((j, i) => `<div class="it"><button class="itm" data-j="${i}"><span style="font-size:20px">${ic[j.type || 'trabalho']}</span><span class="t"><b>${fmtHa(j.areaM2)}</b> · ${esc(j.name || j.mapName)}<br><span class="muted small">${esc(j.name ? j.mapName + ' · ' : '')}${fmtDate(j.start)}</span></span></button><button class="del" data-delj="${i}" aria-label="Excluir medição">🗑</button></div>`).join('')}</div>` : '<p class="muted">Nenhuma medição salva neste aparelho.</p>'}
+    <div class="row">${jobs.length > 1 ? '<button class="linkdanger" id="jdelall">Excluir todo o histórico</button>' : ''}<span class="sp"></span><button class="btn" id="jlc">Fechar</button></div>`);
   $('#jlc').onclick = closeSheet;
   $$('#sheetBody [data-j]').forEach(b => b.onclick = () => openJobSheet(jobs[+b.dataset.j]));
+  $$('#sheetBody [data-delj]').forEach(b => b.onclick = async () => {
+    const j = jobs[+b.dataset.delj]; closeSheet();
+    if (await confirmSheet(`Excluir a medição de ${fmtHa(j.areaM2)} (${fmtDate(j.start)})?`, 'Excluir')) { await db.del('jobs', j.id).catch(() => { }); if (S.showJob && S.showJob.id === j.id) { S.showJob = null; requestDraw(); } toast('Medição excluída'); }
+    openJobsList();
+  });
+  if ($('#jdelall')) $('#jdelall').onclick = async () => {
+    closeSheet();
+    if (await confirmSheet(`Excluir as ${jobs.length} medições salvas neste aparelho? Isso não pode ser desfeito.`, 'Excluir tudo')) { for (const j of jobs) await db.del('jobs', j.id).catch(() => { }); S.showJob = null; requestDraw(); toast('Histórico apagado'); }
+    openJobsList();
+  };
 }
 
 /* ================= barra de opções / modos ================= */
@@ -2031,13 +2081,17 @@ $('#backBtn').onclick = async () => {
 $('#menuBtn').onclick = () => S.role === 'edit' ? openEditMenu() : openDriveMenu();
 
 /* ================= menus do mapa ================= */
-function upListHtml() {
-  return S.map.ups.length ? `<div class="list">${S.map.ups.map((u, i) => { const r = S.upCache.get(u.id), a = r ? fmtAreaPx(r.area) : null; return `<button class="it" data-up="${i}"><span class="upsw" style="background:${u.color}"></span><span class="t">${esc(u.name || 'UP sem nome')}</span>${a ? `<span class="badge">${a}</span>` : ''}</button>`; }).join('')}</div>` : '';
+function upListHtml(canDel) {
+  return S.map.ups.length ? `<div class="list">${S.map.ups.map((u, i) => { const r = S.upCache.get(u.id), a = r ? fmtAreaPx(r.area) : null; return `<div class="it"><button class="itm" data-up="${i}"><span class="upsw" style="background:${u.color}"></span><span class="t">${esc(u.name || 'UP sem nome')}</span>${a ? `<span class="badge">${a}</span>` : ''}</button>${canDel ? `<button class="del" data-delup="${i}" aria-label="Excluir UP">🗑</button>` : ''}</div>`; }).join('')}</div>` : '';
 }
 function obsListHtml(list) {
-  return list.length ? `<div class="list">${list.map((o, i) => `<button class="it" data-ob="${i}"><span>${(o.style || 'label') === 'pin' ? '📌' : '🔤'}</span><span class="t">${esc(o.text.replace(/\n/g, ' '))}</span></button>`).join('')}</div>` : '';
+  return list.length ? `<div class="list">${list.map((o, i) => `<div class="it"><button class="itm" data-ob="${i}"><span>${(o.style || 'label') === 'pin' ? '📌' : '🔤'}</span><span class="t">${esc(o.text.replace(/\n/g, ' '))}</span></button>${obsEditable(o) ? `<button class="del" data-delob="${i}" aria-label="Excluir observação">🗑</button>` : ''}</div>`).join('')}</div>` : '';
 }
-function bindMenuLists(obsAll) {
+function bindMenuLists(obsAll, reopen) {
+  $$('#sheetBody [data-delup]').forEach(b => b.onclick = async () => { const up = S.map.ups[+b.dataset.delup]; closeSheet(); await deleteUp(up); reopen(); });
+  $$('#sheetBody [data-delob]').forEach(b => b.onclick = async () => { const o = obsAll[+b.dataset.delob]; closeSheet(); await deleteObs(o); reopen(); });
+  if ($('#delAllUps')) $('#delAllUps').onclick = async () => { closeSheet(); await deleteAllUps(); reopen(); };
+  if ($('#delAllObs')) $('#delAllObs').onclick = async () => { closeSheet(); await deleteAllObs(); reopen(); };
   $$('#sheetBody [data-up]').forEach(b => b.onclick = () => {
     const up = S.map.ups[+b.dataset.up], r = S.upCache.get(up.id); closeSheet(); setFollow(false);
     if (S.mode !== 'pan') setMode('pan', true);
@@ -2055,7 +2109,7 @@ function openDriveMenu() {
     ${upListHtml() || '<p class="muted small" style="margin:0">Nenhuma UP marcada neste mapa.</p>'}
     <h4>Observações (${obsAll.length})</h4>
     ${obsListHtml(obsAll) || '<p class="muted small" style="margin:0">Nenhuma. Use a opção <b>Texto</b>.</p>'}
-    ${S.obsLocal.length ? '<button class="btn wide" id="dmObsShare" style="margin-top:8px">📤 Enviar minhas observações</button>' : ''}
+    ${S.obsLocal.length ? `<button class="btn wide" id="dmObsShare" style="margin-top:8px">📤 Enviar minhas observações</button><div style="text-align:right"><button class="linkdanger" id="delAllObs">Excluir minhas observações</button></div>` : ''}
     <h4>Localização</h4>
     <div class="grid2"><button class="btn" id="dmGps">${S.watchId != null ? '⏹ Desligar GPS' : '▶️ Ligar GPS'}</button><button class="btn" id="dmComp">🧭 Bússola: ${S.compassOn ? 'ligada' : 'desligada'}</button></div>
     ${S.gps ? `<p class="muted small">Sua posição: ${S.gps.lat.toFixed(6)}, ${S.gps.lon.toFixed(6)} (±${Math.round(S.gps.acc)} m)${S.T && S.T.utm ? (() => { const e = UTM.fwd(S.gps.lat, S.gps.lon, S.T.utm.zone, S.T.utm.south); return `<br>UTM ${S.T.utm.zone}${S.T.utm.south ? 'S' : 'N'}: E ${fmtInt(e.E)} · N ${fmtInt(e.N)}`; })() : ''}</p>` : ''}
@@ -2066,7 +2120,7 @@ function openDriveMenu() {
   $('#dmGps').onclick = () => { if (S.watchId != null) stopGps(); else startGps(); openDriveMenu(); };
   $('#dmComp').onclick = async () => { await toggleCompass(); openDriveMenu(); };
   if ($('#dmObsShare')) $('#dmObsShare').onclick = () => shareText(S.obsLocal.map(obsShareText).join('\n\n'));
-  bindMenuLists(obsAll);
+  bindMenuLists(obsAll, openDriveMenu);
 }
 function openEditMenu() {
   const map = S.map, nOk = map.calib.filter(hasCoord).length;
@@ -2087,11 +2141,13 @@ function openEditMenu() {
     ${map.calib.length ? `<div class="list" style="margin-top:8px">${calibList}</div>` : ''}
     ${hasScale(map) ? '' : `<label class="chk"><input type="checkbox" id="emAff" ${map.affine ? 'checked' : ''} ${nOk < 3 ? 'disabled' : ''}><span>Ajuste livre — para mapas esticados ou fora de escala (precisa de 3+ pontos bem espalhados)</span></label>`}
     <h4>UPs (${map.ups.length})</h4>
-    ${upListHtml() || '<p class="muted small" style="margin:0">Use <b>Ajustar UPs</b> e toque nas áreas.</p>'}
+    ${upListHtml(true) || '<p class="muted small" style="margin:0">Use <b>Ajustar UPs</b> e toque nas áreas.</p>'}
+    ${map.ups.length > 1 ? '<div style="text-align:right"><button class="linkdanger" id="delAllUps">Excluir todas as UPs</button></div>' : ''}
     <h4>Observações (${map.labels.length})</h4>
     ${obsListHtml(map.labels) || '<p class="muted small" style="margin:0">Nenhuma.</p>'}
+    ${map.labels.length > 1 ? '<div style="text-align:right"><button class="linkdanger" id="delAllObs">Excluir todas as observações</button></div>' : ''}
     <div class="grid2" style="margin-top:16px"><button class="btn" id="emJobs">📋 Medições</button><button class="btn" id="emComp">🧭 Bússola: ${S.compassOn ? 'ligada' : 'desligada'}</button></div>
-    <div class="row"><button class="btn danger" id="emDel">Excluir mapa</button><span class="sp"></span><button class="btn" id="emClose">Fechar</button></div>`);
+    <div class="row"><button class="btn danger" id="emDel">🗑 Excluir mapa</button><span class="sp"></span><button class="btn" id="emClose">Fechar</button></div>`);
   $('#emClose').onclick = closeSheet;
   $('#emCalib').onclick = () => { closeSheet(); setMode('calib'); };
   $('#emScale').onclick = openScaleSheet;
@@ -2099,7 +2155,7 @@ function openEditMenu() {
   $('#emComp').onclick = async () => { await toggleCompass(); openEditMenu(); };
   $('#emRename').onclick = async () => { const n = await askText('Nome do mapa', 'Ex.: Fazenda Boa Vista', map.name, 'Salvar'); if (n) { map.name = n; markDirty(); toast('Nome salvo'); } };
   $('#emPreview').onclick = async () => { closeSheet(); await saveWorkspaceMap(); const m = map; leaveMapSilently(); await openWorkspaceMap(m, 'drive'); };
-  bindMenuLists(map.labels);
+  bindMenuLists(map.labels, openEditMenu);
   $$('#sheetBody [data-cal]').forEach(b => b.onclick = () => { const p = map.calib[+b.dataset.cal]; closeSheet(); setMode('calib', true); setFollow(false); centerOn(p.x, p.y); openCalibSheet(p, false); });
   if ($('#emAff')) $('#emAff').onchange = e => {
     map.affine = e.target.checked; S.T = computeTransform(map);
@@ -2108,7 +2164,7 @@ function openEditMenu() {
   };
   $('#emDel').onclick = async () => {
     closeSheet();
-    if (!(await confirmSheet(`Excluir o mapa “${map.name}” deste aparelho? (Se ele já foi publicado, continua no site até você publicar de novo.)`, 'Excluir'))) return;
+    if (!(await confirmSheet(`Excluir o mapa “${map.name}” com todas as UPs, observações e calibração? Para ele sumir também dos celulares dos tratoristas, gere os arquivos e envie a pasta mapas ao GitHub depois.`, 'Excluir mapa'))) return;
     await db.del('maps', map.id); S.dirty = false; leaveMapSilently(); renderAdmin(); toast('Mapa excluído');
   };
 }
@@ -2144,8 +2200,14 @@ async function renderAdmin() {
   el.innerHTML = maps.map((m, i) => {
     const cal = (m.calib || []).filter(hasCoord).length >= needPts(m);
     return `<div class="mapcard"><div class="mi">🗺️</div><div class="t"><b>${esc(m.name)}</b><span class="muted small">${(m.ups || []).length} UP(s) · editado ${fmtDate(m.updated)}</span><br>${cal ? '<span class="badge good">calibrado</span>' : '<span class="badge mid">sem calibração</span>'} ${!st || !st.maps || st.maps[m.id] !== m.updated ? '<span class="badge bad">não enviado</span>' : '<span class="badge good">enviado</span>'} ${hasScale(m) ? '' : '<span class="badge mid">sem escala</span>'} ${m.geo && m.geo.mPerPx > 0 ? `<span class="badge">1:${fmtInt(m.geo.ratio || 0) || '?'}</span>` : ''}
-      <div class="acts"><button class="btn primary" data-ed="${i}">Editar</button><button class="btn" data-pv="${i}">👁 Testar</button></div></div></div>`;
+      <div class="acts"><button class="btn primary" data-ed="${i}">Editar</button><button class="btn" data-pv="${i}">👁 Testar</button><button class="btn danger" data-del="${i}">🗑 Excluir</button></div></div></div>`;
   }).join('');
+  $$('#adminList [data-del]').forEach(b => b.onclick = async () => {
+    const m = maps[+b.dataset.del];
+    if (!(await confirmSheet(`Excluir o mapa “${m.name}” com todas as UPs, observações e calibração? Para ele sumir também dos celulares dos tratoristas, gere os arquivos e envie a pasta mapas ao GitHub depois.`, 'Excluir mapa'))) return;
+    await db.del('maps', m.id).catch(() => { }); try { localStorage.removeItem('view:' + m.id); } catch (e) { }
+    toast('Mapa excluído'); renderAdmin();
+  });
   $$('#adminList [data-ed]').forEach(b => b.onclick = () => openWorkspaceMap(maps[+b.dataset.ed], 'edit'));
   $$('#adminList [data-pv]').forEach(b => b.onclick = () => openWorkspaceMap(maps[+b.dataset.pv], 'drive'));
 }
