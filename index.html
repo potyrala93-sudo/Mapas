@@ -128,6 +128,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .list .itm{display:flex;align-items:center;gap:10px;flex:1;min-width:0;text-align:left;padding:7px 0}
 .list .del{width:40px;height:40px;border-radius:10px;flex:none;font-size:17px}
 .list .del:active{background:#fef2f2}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;max-height:132px;overflow:auto}
+.chip{padding:7px 11px;border-radius:999px;background:#eef2f7;font-weight:600;font-size:13px}
+.chip.on{background:var(--accent);color:#fff}
 .linkdanger{color:var(--danger);font-size:14px;padding:8px 4px;font-weight:600}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .sumbig{font-size:34px;font-weight:800;letter-spacing:-.02em;margin:2px 0 6px}
@@ -366,7 +369,7 @@ function askText(title, placeholder, value = '', okLabel = 'OK', allowEmpty = fa
     $('#ano').onclick = () => { closeSheet(); res(null); };
     $('#aok').onclick = go;
     $('#atx').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
-    setTimeout(() => $('#atx').focus(), 60);
+    setTimeout(() => { const el = $('#atx'); if (el) el.focus(); }, 60);
   });
 }
 function download(blob, name) {
@@ -1198,18 +1201,27 @@ function selectSaved(up) {
 }
 function clearSel() { if (!S.sel) return; S.sel = null; renderCtx(); requestDraw(); }
 function upInfoSub(up, r) {
-  const parts = [];
-  const a = fmtAreaPx(r.area); parts.push(a ? 'Área ≈ ' + a : 'Calibre o mapa para ver a área');
+  const parts = [], U = utilM2(up);
+  if (U) {
+    const cmp = hasMetric() ? cadCompare(areaM2(r.area), U) : null;
+    parts.push(`Área útil <b>${fmtHa(U)}</b>` + (cmp ? ` · marcada ${fmtAreaPx(r.area)}${cmp.warn ? ' ⚠️' : ''}` : ''));
+  } else { const a = fmtAreaPx(r.area); parts.push(a ? 'Área ≈ ' + a : 'Calibre o mapa para ver a área'); }
   if (up.parts && up.parts.length > 1) parts.push(up.parts.length + ' áreas');
   if (S.gps && S.T) { const g = geoToMap(S.gps.lat, S.gps.lon, S.T); if (inRes(r, g.x, g.y)) parts.push('📍 você está aqui'); }
-  if (S.meas && S.meas.type === 'trabalho' && S.cov) { const c = S.cov.perUp.get(up.id) || 0; if (c) parts.push('trabalhado ' + fmtHa(c * CELL * CELL)); }
+  if (S.meas && S.meas.type === 'trabalho' && S.cov) { const c = (S.cov.perUp.get(up.id) || 0) * CELL * CELL; if (c) parts.push('trabalhado ' + fmtHa(U ? Math.min(c, U) : c)); }
   return parts.join(' · ');
 }
-function openUpNameSheet(up, isNew, onSave) {
+function openUpNameSheet(up, isNew, onSave, drawnPx) {
   const orig = { name: up.name, color: up.color };
+  if (drawnPx == null) { const r = S.upCache.get(up.id); drawnPx = r ? r.area : null; }
+  const cad = S.map.cad || [];
+  const used = new Set(S.map.ups.filter(u => u !== up).map(u => normName(u.name)));
+  const free = cad.filter(c => !used.has(normName(c.name)));
   openSheet(`
     <h3>${isNew ? 'Nomear como UP' : 'Editar UP'}</h3>
-    <div class="field"><label>Nome ou número da UP</label><input type="text" id="un" placeholder="Ex.: UP 012" value="${esc(up.name || '')}" autocomplete="off"></div>
+    <div class="field"><label>Nome ou número da UP</label><input type="text" id="un" placeholder="${cad.length ? 'Escolha abaixo ou digite' : 'Ex.: UP 012'}" value="${esc(up.name || '')}" autocomplete="off">
+      ${free.length ? `<div class="chips" id="unChips">${free.map(c => `<button class="chip" data-n="${esc(c.name)}">${esc(c.name)} · ${fmtHaN(c.ha)}</button>`).join('')}</div>` : (cad.length ? '' : '<div class="muted small" style="margin-top:6px">Dica: cole a tabela de áreas úteis em ☰ → Cadastro de UPs para escolher o nome numa lista.</div>')}
+      <div id="unInfo" class="small" style="margin-top:8px"></div></div>
     <div class="field"><label>Cor do destaque</label><div class="swatches" id="uc">${UP_COLORS.map(col => `<button data-c="${col}" class="${col === up.color ? 'on' : ''}" style="background:${col}" aria-label="cor ${col}"></button>`).join('')}</div></div>
     <div class="row">${isNew ? '' : '<button class="btn danger" id="udel">Excluir UP</button>'}<span class="sp"></span><button class="btn" id="ucancel">Cancelar</button><button class="btn primary" id="usave">Salvar</button></div>`, cancel);
   function cancel() { Object.assign(up, orig); if (S.sel && S.sel.up === up) S.sel.ov = makeOverlay(S.sel.res, up.color); requestDraw(); }
@@ -1218,7 +1230,23 @@ function openUpNameSheet(up, isNew, onSave) {
     up.color = b.dataset.c; $$('#uc button').forEach(x => x.classList.toggle('on', x === b));
     if (S.sel && S.sel.up === up) { S.sel.ov = makeOverlay(S.sel.res, up.color); requestDraw(); }
   };
-  const save = () => { up.name = $('#un').value.trim(); closeSheet(); onSave(); };
+  const info = () => {
+    const v = $('#un').value.trim(), c = findCad(v), drawnM2 = drawnPx != null && hasMetric() ? areaM2(drawnPx) : null;
+    $$('#unChips .chip').forEach(b => b.classList.toggle('on', normName(b.dataset.n) === normName(v)));
+    let h = '';
+    if (c) {
+      const cmp = cadCompare(drawnM2, c.ha * 10000);
+      h = `Área útil cadastrada: <b>${fmtHaN(c.ha)}</b>`;
+      if (cmp) h += cmp.warn ? `<br><span style="color:#b45309">⚠️ A área marcada no mapa (${fmtHa(drawnM2)}) está ${cmp.d > 0 ? 'maior' : 'menor'} que a área útil (${cmp.txt}). Confira se marcou todas as áreas da UP. A UP vai usar a área útil do cadastro.</span>` : `<br><span style="color:#166534">✓ Área marcada no mapa: ${fmtHa(drawnM2)} (${cmp.txt})</span>`;
+    } else if (v && cad.length) h = '<span style="color:#b45309">Esse nome não está no cadastro: a UP vai usar a área marcada no mapa.</span>';
+    else if (drawnM2 != null) h = `Área marcada no mapa: ${fmtHa(drawnM2)}`;
+    if (v && used.has(normName(v))) h += '<br><span style="color:#b45309">Já existe outra UP com esse nome.</span>';
+    $('#unInfo').innerHTML = h;
+  };
+  $('#un').addEventListener('input', info);
+  $$('#unChips .chip').forEach(b => b.onclick = () => { $('#un').value = b.dataset.n; info(); });
+  info();
+  const save = () => { const v = $('#un').value.trim(), c = findCad(v); up.name = c ? c.name : v; closeSheet(); onSave(); };
   $('#usave').onclick = save;
   $('#un').addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
   $('#ucancel').onclick = () => { closeSheet(); cancel(); };
@@ -1229,7 +1257,59 @@ function openUpNameSheet(up, isNew, onSave) {
     S.upCache.delete(up.id); S.sel = null; rebuildOverlay(); renderCtx(); markDirty(); updateStatus();
     toast('UP excluída');
   };
-  setTimeout(() => $('#un').focus(), 60);
+  setTimeout(() => { const el = $('#un'); if (el) el.focus(); }, 60);
+}
+
+/* ================= cadastro de UPs (área útil) ================= */
+const normName = s => String(s || '').toUpperCase().replace(/\s+/g, ' ').trim();
+function findCad(name, map = S.map) { const n = normName(name); if (!n || !map || !map.cad) return null; return map.cad.find(c => normName(c.name) === n) || null; }
+const utilM2 = up => { const c = findCad(up && up.name); return c ? c.ha * 10000 : null; };
+function parseCadTable(text) {
+  const out = new Map();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const t = line.trim(); if (!t) continue;
+    const m = t.match(/^(.+?)[\t;,\s]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?)\s*(?:ha)?$/i);
+    if (!m) continue;
+    let num = m[2]; num = num.includes(',') ? num.replace(/\./g, '').replace(',', '.') : num;
+    const ha = parseFloat(num), name = m[1].trim().replace(/[\t;,]+$/, '').trim();
+    if (!name || !(ha > 0) || /^(up|nome|ups)$/i.test(name)) continue;
+    out.set(normName(name), { name, ha });
+  }
+  return [...out.values()];
+}
+const fmtHaN = ha => ha.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ha';
+// compara a área marcada no mapa com a área útil do cadastro
+function cadCompare(drawnM2, U) {
+  if (drawnM2 == null || !U) return null;
+  const d = (drawnM2 - U) / U;
+  return { d, warn: Math.abs(d) > 0.15, txt: `${d >= 0 ? '+' : ''}${Math.round(d * 100)}%` };
+}
+function openCadSheet() {
+  const map = S.map, cad = map.cad || [];
+  const rows = cad.map(c => {
+    const up = map.ups.find(u => normName(u.name) === normName(c.name)), r = up && S.upCache.get(up.id);
+    const cmp = r && hasMetric() ? cadCompare(areaM2(r.area), c.ha * 10000) : null;
+    return `<div class="it"><span class="t"><b>${esc(c.name)}</b> · ${fmtHaN(c.ha)}</span>${up ? (cmp ? `<span class="badge ${cmp.warn ? 'mid' : 'good'}" title="área marcada no mapa">${cmp.warn ? '⚠️ ' : '✓ '}${cmp.txt}</span>` : '<span class="badge good">marcada</span>') : '<span class="badge">não marcada</span>'}</div>`;
+  }).join('');
+  const done = cad.filter(c => map.ups.some(u => normName(u.name) === normName(c.name))).length;
+  openSheet(`<h3>📋 Cadastro de UPs (área útil)</h3>
+    <p class="muted small" style="margin-top:-4px">No Excel, selecione as colunas <b>UP</b> e <b>Área Útil</b>, copie e cole aqui. Colar de novo substitui o cadastro.</p>
+    <textarea id="cadTxt" rows="5" placeholder="S2AS01&#9;21,54&#10;S2AS02&#9;55,87&#10;…"></textarea>
+    <div id="cadPrev" class="small muted" style="margin-top:6px"></div>
+    <div class="row" style="margin-top:8px"><span class="sp"></span><button class="btn primary" id="cadSave" disabled>Salvar tabela colada</button></div>
+    ${cad.length ? `<h4>No cadastro (${cad.length}) · total ${fmtHaN(cad.reduce((a, c) => a + c.ha, 0))} · ${done} marcada(s) no mapa</h4><div class="list">${rows}</div>
+      <p class="muted small">A porcentagem compara a área marcada no mapa com a área útil. ⚠️ = diferença maior que 15% (confira se marcou todas as áreas da UP).</p>` : ''}
+    <div class="row">${cad.length ? '<button class="linkdanger" id="cadDel">Apagar cadastro</button>' : ''}<span class="sp"></span><button class="btn" id="cadClose">Fechar</button></div>`);
+  const prev = () => {
+    const list = parseCadTable($('#cadTxt').value);
+    $('#cadPrev').innerHTML = $('#cadTxt').value.trim() ? (list.length ? `${list.length} UP(s) encontradas · total ${fmtHaN(list.reduce((a, c) => a + c.ha, 0))}` : '⚠️ Não reconheci nenhuma linha. Cada linha precisa ter o nome da UP e a área (ex.: S2AS01 21,54).') : '';
+    $('#cadSave').disabled = !list.length;
+    return list;
+  };
+  $('#cadTxt').addEventListener('input', prev);
+  $('#cadSave').onclick = () => { const list = prev(); if (!list.length) return; map.cad = list; markDirty(); renderCtx(); toast(`Cadastro salvo: ${list.length} UPs ✓`); openCadSheet(); };
+  $('#cadClose').onclick = closeSheet;
+  if ($('#cadDel')) $('#cadDel').onclick = async () => { closeSheet(); if (await confirmSheet('Apagar o cadastro de áreas úteis deste mapa? As UPs marcadas continuam.', 'Apagar')) { map.cad = []; markDirty(); renderCtx(); toast('Cadastro apagado'); } };
 }
 
 /* --- excluir --- */
@@ -1339,8 +1419,9 @@ async function pickSave() {
   openUpNameSheet(up, true, () => {
     store(up); S.map.ups.push(up);
     pickStart(null); rebuildOverlay(); markDirty(); renderCtx(); updateStatus();
-    toast(`UP salva ✓ (${S.map.ups.length} no mapa)`);
-  });
+    const U = utilM2(up);
+    toast(U ? `UP ${up.name} salva ✓ Área útil ${fmtHa(U)}` : `UP salva ✓ (${S.map.ups.length} no mapa)`);
+  }, mg.area);
 }
 
 /* --- cartão de contexto (parte de baixo da tela) --- */
@@ -1767,12 +1848,31 @@ async function toggleCompass() {
 
 /* ================= Medir ================= */
 // --- desenhando no mapa ---
+// aplica o cadastro: em cada UP, a área medida não passa da área útil; fora das UPs não conta
+function summarize(perUpRaw, outM2, rawTotal) {
+  const hasCad = !!(S.map && S.map.cad && S.map.cad.length);
+  const perUp = perUpRaw.map(u => { const up = S.map.ups.find(x => x.id === u.id), U = up ? utilM2(up) : null; return { ...u, util: U, adj: U ? Math.min(u.m2, U) : u.m2 }; });
+  return { perUp, hasCad, outM2, rawTotal, adjTotal: hasCad ? perUp.reduce((a, u) => a + u.adj, 0) : rawTotal };
+}
+function trabSummary() {
+  const perUpRaw = [...S.cov.perUp.entries()].map(([id, c]) => { const u = S.map.ups.find(x => x.id === id); return { id, name: (u && u.name) || 'UP sem nome', m2: c * CELL * CELL }; }).sort((a, b) => b.m2 - a.m2);
+  return summarize(perUpRaw, S.cov.out * CELL * CELL, S.cov.total * CELL * CELL);
+}
+function polySummary(mapPts, rawTotal) { const { perUp, outM2 } = polyPerUp(mapPts); return summarize(perUp, outM2, rawTotal); }
+function capLine(sm) {
+  if (!sm.hasCad) return '';
+  const capped = sm.perUp.filter(u => u.util && u.m2 > u.adj + 1);
+  const parts = [];
+  if (capped.length) parts.push(`limitado à área útil em ${capped.map(u => esc(u.name)).join(', ')}`);
+  if (sm.outM2 >= 50) parts.push(`${fmtHa(sm.outM2)} fora das UPs não contam`);
+  return parts.length ? `<p class="muted small" style="margin:0 0 8px">Medida bruta ${fmtHa(sm.rawTotal)}: ${parts.join('; ')}.</p>` : '';
+}
 async function saveDrawMeasure() {
   const pts = S.mdraw.slice(), mt = polyMetrics(pts);
   const name = await askText('Nome da medição (opcional)', 'Ex.: Área da sede', '', 'Salvar', true);
   if (name === null) return;
-  const { perUp, outM2 } = polyPerUp(pts);
-  const job = { id: uid(), type: 'desenho', name, mapId: S.map.id, mapName: S.map.name, start: Date.now(), end: Date.now(), areaM2: mt.area, perimM: mt.perim, poly: pts, perUp, outM2 };
+  const sm = polySummary(pts, mt.area);
+  const job = { id: uid(), type: 'desenho', name, mapId: S.map.id, mapName: S.map.name, start: Date.now(), end: Date.now(), areaM2: sm.adjTotal, rawM2: mt.area, adjusted: sm.hasCad, perimM: mt.perim, poly: pts, perUp: sm.perUp, outM2: sm.outM2 };
   try { await db.put('jobs', job); } catch (e) { toast('Erro ao salvar: ' + e.message); return; }
   S.mdraw = []; S.showJob = job; renderCtx(); requestDraw();
   openJobSheet(job);
@@ -1891,9 +1991,15 @@ function updateMeasNumbers() {
   const mt = measArea();
   $('#mTot').textContent = fmtHa(mt.area);
   if (m.type === 'trabalho') {
-    const up = gpsUp();
-    $('#mUp').innerHTML = up ? `Nesta UP (<b>${esc(up.name || 'sem nome')}</b>): <b>${fmtHa((S.cov.perUp.get(up.id) || 0) * CELL * CELL)}</b>` : (S.gps ? 'Fora das UPs' : 'Aguardando GPS…');
-    $('#mInfo').textContent = `${fmtM(m.distM)} percorridos · desde ${hm(new Date(m.started))}`;
+    const sm = trabSummary(), up = gpsUp();
+    $('#mTot').textContent = fmtHa(sm.adjTotal);
+    let upTxt = S.gps ? 'Fora das UPs' : 'Aguardando GPS…';
+    if (up) {
+      const raw = (S.cov.perUp.get(up.id) || 0) * CELL * CELL, U = utilM2(up);
+      upTxt = `Nesta UP (<b>${esc(up.name || 'sem nome')}</b>): <b>${fmtHa(U ? Math.min(raw, U) : raw)}</b>${U ? ` de ${fmtHa(U)}${raw >= U ? ' · ✅ área útil completa' : ''}` : ''}`;
+    }
+    $('#mUp').innerHTML = upTxt;
+    $('#mInfo').textContent = `${fmtM(m.distM)} percorridos · desde ${hm(new Date(m.started))}` + (sm.hasCad && sm.outM2 >= 50 ? ` · ${fmtHa(sm.outM2)} fora das UPs (não conta)` : '');
   } else {
     $('#mUp').textContent = m.pts.length < 3 ? 'Ande em volta da área…' : `Perímetro ${fmtM(mt.perim)}`;
     $('#mInfo').textContent = `${m.pts.length} pontos · desde ${hm(new Date(m.started))}`;
@@ -1908,7 +2014,8 @@ async function finishMeasFlow() {
     if (await confirmSheet('O contorno ainda tem menos de 3 pontos. Descartar?', 'Descartar')) { S.meas = null; await db.del('kv', 'meas').catch(() => { }); renderMeas(); renderCtx(); requestDraw(); }
     return;
   }
-  openSheet(`<h3>Finalizar medição?</h3><div class="sumbig">${fmtHa(mt.area)}</div>
+  const sm0 = m.type === 'contorno' ? polySummary(geoPtsToMap(m.pts), mt.area) : trabSummary();
+  openSheet(`<h3>Finalizar medição?</h3><div class="sumbig">${fmtHa(sm0.adjTotal)}</div>${capLine(sm0)}
     <div class="field"><label>Nome (opcional)</label><input type="text" id="fname" placeholder="Ex.: Gradagem UP 012" autocomplete="off"></div>
     <div class="row"><button class="btn danger" id="fdisc">Descartar</button><span class="sp"></span><button class="btn" id="fno">Voltar</button><button class="btn primary" id="fok">Salvar</button></div>`);
   $('#fno').onclick = closeSheet;
@@ -1921,13 +2028,9 @@ async function finishMeasFlow() {
     const name = $('#fname').value.trim();
     closeSheet();
     let job;
-    if (m.type === 'contorno') {
-      const mp = geoPtsToMap(m.pts), { perUp, outM2 } = polyPerUp(mp);
-      job = { id: m.id, type: 'contorno', name, mapId: m.mapId, mapName: m.mapName, start: m.started, end: Date.now(), areaM2: mt.area, perimM: mt.perim, pts: m.pts, perUp, outM2, distM: m.distM };
-    } else {
-      const perUp = [...S.cov.perUp.entries()].map(([id, c]) => { const u = S.map.ups.find(x => x.id === id); return { id, name: (u && u.name) || 'UP sem nome', m2: c * CELL * CELL }; }).sort((a, b) => b.m2 - a.m2);
-      job = { id: m.id, type: 'trabalho', name, mapId: m.mapId, mapName: m.mapName, start: m.started, end: Date.now(), width: m.width, areaM2: mt.area, outM2: S.cov.out * CELL * CELL, perUp, distM: m.distM, segs: m.segs };
-    }
+    const sm = sm0;
+    if (m.type === 'contorno') job = { id: m.id, type: 'contorno', name, mapId: m.mapId, mapName: m.mapName, start: m.started, end: Date.now(), areaM2: sm.adjTotal, rawM2: mt.area, adjusted: sm.hasCad, perimM: mt.perim, pts: m.pts, perUp: sm.perUp, outM2: sm.outM2, distM: m.distM };
+    else job = { id: m.id, type: 'trabalho', name, mapId: m.mapId, mapName: m.mapName, start: m.started, end: Date.now(), width: m.width, areaM2: sm.adjTotal, rawM2: sm.rawTotal, adjusted: sm.hasCad, outM2: sm.outM2, perUp: sm.perUp, distM: m.distM, segs: m.segs };
     try { await db.put('jobs', job); await db.del('kv', 'meas'); } catch (e) { toast('Erro ao salvar: ' + e.message); return; }
     S.meas = null; S.cov = null; S.showJob = job; renderMeas(); renderCtx(); requestDraw();
     openJobSheet(job);
@@ -1942,9 +2045,10 @@ function jobText(j) {
   L.push(type === 'desenho' ? `📅 ${d.toLocaleDateString('pt-BR')}, ${hm(d)}` : `📅 ${d.toLocaleDateString('pt-BR')}, ${hm(d)} às ${hm(e)}`);
   L.push(JOB_LABEL[type]);
   if (type === 'trabalho') L.push(`🚜 Implemento: ${String(j.width).replace('.', ',')} m`);
-  L.push(`✅ Área: ${fmtHa(j.areaM2)}`);
-  (j.perUp || []).forEach(u => L.push(`   • ${u.name}: ${fmtHa(u.m2)}`));
-  if ((j.perUp || []).length && j.outM2 >= 50) L.push(`   • Fora das UPs: ${fmtHa(j.outM2)}`);
+  L.push(j.adjusted ? `✅ Área: ${fmtHa(j.areaM2)} (limitada à área útil de cada UP)` : `✅ Área: ${fmtHa(j.areaM2)}`);
+  (j.perUp || []).forEach(u => L.push(`   • ${u.name}: ${fmtHa(u.adj != null ? u.adj : u.m2)}${u.util ? ` de ${fmtHa(u.util)}${u.m2 > u.util + 1 ? ` (medido ${fmtHa(u.m2)})` : ''}` : ''}`));
+  if ((j.perUp || []).length && j.outM2 >= 50) L.push(`   • Fora das UPs: ${fmtHa(j.outM2)}${j.adjusted ? ' (não conta)' : ''}`);
+  if (j.adjusted && j.rawM2 != null && Math.abs(j.rawM2 - j.areaM2) >= 50) L.push(`📐 Medida bruta: ${fmtHa(j.rawM2)}`);
   if (j.perimM) L.push(`📏 Perímetro: ${fmtM(j.perimM)}`);
   if (type === 'trabalho') L.push(`↔️ Percorrido: ${fmtM(j.distM)}`);
   return L.join('\n');
@@ -2082,7 +2186,7 @@ $('#menuBtn').onclick = () => S.role === 'edit' ? openEditMenu() : openDriveMenu
 
 /* ================= menus do mapa ================= */
 function upListHtml(canDel) {
-  return S.map.ups.length ? `<div class="list">${S.map.ups.map((u, i) => { const r = S.upCache.get(u.id), a = r ? fmtAreaPx(r.area) : null; return `<div class="it"><button class="itm" data-up="${i}"><span class="upsw" style="background:${u.color}"></span><span class="t">${esc(u.name || 'UP sem nome')}</span>${a ? `<span class="badge">${a}</span>` : ''}</button>${canDel ? `<button class="del" data-delup="${i}" aria-label="Excluir UP">🗑</button>` : ''}</div>`; }).join('')}</div>` : '';
+  return S.map.ups.length ? `<div class="list">${S.map.ups.map((u, i) => { const r = S.upCache.get(u.id), U = utilM2(u), a = U ? fmtHa(U) : (r ? fmtAreaPx(r.area) : null); return `<div class="it"><button class="itm" data-up="${i}"><span class="upsw" style="background:${u.color}"></span><span class="t">${esc(u.name || 'UP sem nome')}</span>${a ? `<span class="badge">${a}</span>` : ''}</button>${canDel ? `<button class="del" data-delup="${i}" aria-label="Excluir UP">🗑</button>` : ''}</div>`; }).join('')}</div>` : '';
 }
 function obsListHtml(list) {
   return list.length ? `<div class="list">${list.map((o, i) => `<div class="it"><button class="itm" data-ob="${i}"><span>${(o.style || 'label') === 'pin' ? '📌' : '🔤'}</span><span class="t">${esc(o.text.replace(/\n/g, ' '))}</span></button>${obsEditable(o) ? `<button class="del" data-delob="${i}" aria-label="Excluir observação">🗑</button>` : ''}</div>`).join('')}</div>` : '';
@@ -2140,6 +2244,9 @@ function openEditMenu() {
     <button class="btn ${S.T || !hasScale(map) ? '' : 'primary'} wide" id="emCalib">📐 Calibrar mapa</button>
     ${map.calib.length ? `<div class="list" style="margin-top:8px">${calibList}</div>` : ''}
     ${hasScale(map) ? '' : `<label class="chk"><input type="checkbox" id="emAff" ${map.affine ? 'checked' : ''} ${nOk < 3 ? 'disabled' : ''}><span>Ajuste livre — para mapas esticados ou fora de escala (precisa de 3+ pontos bem espalhados)</span></label>`}
+    <h4>Cadastro de UPs · área útil (${(map.cad || []).length})</h4>
+    <p class="muted small" style="margin-top:0">${(map.cad || []).length ? 'As UPs com o mesmo nome usam a área útil do cadastro, e as medições não passam dela.' : 'Cole a tabela do Excel (UP e Área Útil) para as UPs usarem a área oficial.'}</p>
+    <button class="btn wide ${(map.cad || []).length ? '' : 'primary'}" id="emCad">📋 ${(map.cad || []).length ? 'Ver / atualizar cadastro' : 'Colar tabela do Excel'}</button>
     <h4>UPs (${map.ups.length})</h4>
     ${upListHtml(true) || '<p class="muted small" style="margin:0">Use <b>Ajustar UPs</b> e toque nas áreas.</p>'}
     ${map.ups.length > 1 ? '<div style="text-align:right"><button class="linkdanger" id="delAllUps">Excluir todas as UPs</button></div>' : ''}
@@ -2151,6 +2258,7 @@ function openEditMenu() {
   $('#emClose').onclick = closeSheet;
   $('#emCalib').onclick = () => { closeSheet(); setMode('calib'); };
   $('#emScale').onclick = openScaleSheet;
+  $('#emCad').onclick = openCadSheet;
   $('#emJobs').onclick = openJobsList;
   $('#emComp').onclick = async () => { await toggleCompass(); openEditMenu(); };
   $('#emRename').onclick = async () => { const n = await askText('Nome do mapa', 'Ex.: Fazenda Boa Vista', map.name, 'Salvar'); if (n) { map.name = n; markDirty(); toast('Nome salvo'); } };
@@ -2307,7 +2415,7 @@ function publishedMeta(m) {
     id: m.id, name: m.name, updated: m.updated, created: m.created || 0, w: m.w, h: m.h, affine: !!m.affine, geo: m.geo || null, paperMmPerPx: m.paperMmPerPx || null,
     calib: (m.calib || []).filter(hasCoord).map(p => ({ id: p.id, x: p.x, y: p.y, lat: p.lat, lon: p.lon })),
     ups: (m.ups || []).map(u => ({ id: u.id, name: u.name, color: u.color, mask: u.mask, parts: u.parts, area: u.area, cx: u.cx, cy: u.cy })),
-    labels: m.labels || []
+    labels: m.labels || [], cad: m.cad || []
   };
 }
 function buildPackage(maps) {
