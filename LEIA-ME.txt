@@ -25,6 +25,10 @@ MAPA GPS — como publicar no GitHub Pages
    - Satélite: botão 🛰️ (precisa de internet). A barra "Mapa" deixa o mapa
      mais transparente. Para calibrar sem ir a campo: ✋ Alinhar, arraste o
      mapa até as estradas/rios encaixarem no satélite e toque em Concluir.
+   - Cadastro de UPs (área útil): menu ☰ > Cadastro de UPs > cole as colunas
+     UP e Área Útil copiadas do Excel. Ao nomear uma UP, escolha o nome na
+     lista: ela passa a usar a área útil. Nas medições, a área de cada UP não
+     passa da área útil, e o que for medido fora das UPs não conta.
    - Ajustar UPs: toque em todas as áreas que formam a UP (toque de novo
      para desmarcar) > "Nomear como UP". Se a seleção automática não acertar,
      use "Desenhar contorno".
